@@ -1,31 +1,85 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import * as zlib from 'zlib';
+import { promisify } from 'util';
+
+const inflateRaw = promisify(zlib.inflateRaw);
+const inflate = promisify(zlib.inflate);
 
 /**
- * Extract all hyperlink URIs from raw PDF binary.
- * PDFs store links as annotation objects with /URI entries — completely separate
- * from the text layer. pdf-parse never touches these. We read them directly
- * from the buffer with a regex on the raw bytes.
+ * Extract all hyperlink URIs from a PDF buffer.
  *
- * Returns array of unique URLs found in the PDF annotations.
+ * Strategy: PDFs store hyperlinks as /URI annotations inside object streams.
+ * Modern PDFs compress object streams with zlib (FlateDecode). We:
+ * 1. Try plain-text regex on raw buffer first (uncompressed PDFs)
+ * 2. Find all FlateDecode streams, decompress them, regex on the result
+ * 3. Deduplicate and return all found URLs
  */
-function extractUrlsFromPdfBinary(buffer: Buffer): string[] {
-  const text = buffer.toString('latin1'); // latin1 preserves raw bytes faithfully
+async function extractUrlsFromPdf(buffer: Buffer): Promise<string[]> {
+  const urls = new Set<string>();
 
-  const urls: string[] = [];
-  // Match /URI(...) and /URI<...> annotation entries
-  // Handles both plain string /URI(https://...) and hex /URI<...> forms
-  const uriRegex = /\/URI\s*\(([^)]+)\)/g;
-  let match;
-  while ((match = uriRegex.exec(text)) !== null) {
-    const url = match[1].trim();
-    if (url.startsWith('http') || url.startsWith('mailto:')) {
-      urls.push(url);
+  // Helper: extract URIs from a string using both /URI(...) and /URI<...> patterns
+  function extractUris(text: string) {
+    // Standard string form: /URI(https://...)
+    const re1 = /\/URI\s*\(([^)]+)\)/g;
+    let m;
+    while ((m = re1.exec(text)) !== null) {
+      const url = m[1].trim().replace(/\\\//g, '/');
+      if (url.startsWith('http') || url.startsWith('mailto:')) urls.add(url);
+    }
+    // Also catch /URI followed by whitespace then (url)
+    const re2 = /\/URI\s*\n\s*\(([^)]+)\)/g;
+    while ((m = re2.exec(text)) !== null) {
+      const url = m[1].trim().replace(/\\\//g, '/');
+      if (url.startsWith('http') || url.startsWith('mailto:')) urls.add(url);
     }
   }
 
-  // Deduplicate preserving order
-  return [...new Set(urls)];
+  // Pass 1: raw buffer as latin1 (works for uncompressed / partially compressed PDFs)
+  const raw = buffer.toString('latin1');
+  extractUris(raw);
+
+  // Pass 2: find and decompress all FlateDecode streams
+  // PDF stream format: <<...>> stream\r\n[compressed bytes]\r\nendstream
+  // We find stream boundaries and try to inflate the bytes between them
+  const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let streamMatch;
+  const decompressPromises: Promise<void>[] = [];
+
+  while ((streamMatch = streamRegex.exec(raw)) !== null) {
+    const streamContent = streamMatch[1];
+    // Only attempt decompression if this looks like a binary/compressed stream
+    // (contains non-printable chars suggesting compression)
+    const hasBinary = /[\x00-\x08\x0e-\x1f\x80-\xff]/.test(streamContent.substring(0, 100));
+    if (!hasBinary) {
+      // Already plain text — extract URIs directly
+      extractUris(streamContent);
+      continue;
+    }
+
+    // Convert the matched string back to a Buffer for decompression
+    const streamBuf = Buffer.from(streamContent, 'latin1');
+
+    decompressPromises.push(
+      (async () => {
+        // Try inflate (zlib header) first, then inflateRaw (no header)
+        for (const decompress of [inflate, inflateRaw]) {
+          try {
+            const decompressed = await decompress(streamBuf);
+            extractUris(decompressed.toString('latin1'));
+            break;
+          } catch {
+            // Not decompressible with this method — try next
+          }
+        }
+      })()
+    );
+  }
+
+  // Run all decompressions in parallel
+  await Promise.allSettled(decompressPromises);
+
+  return [...urls];
 }
 
 export async function POST(req: Request) {
@@ -39,8 +93,9 @@ export async function POST(req: Request) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // ── Step 1: Extract raw URLs from PDF binary annotations ──────────────────
-    const rawUrls = extractUrlsFromPdfBinary(buffer);
+    // ── Step 1: Extract raw URLs from PDF streams (compressed + uncompressed) ─
+    const rawUrls = await extractUrlsFromPdf(buffer);
+    console.log('Extracted URLs from PDF:', rawUrls);
 
     // ── Step 2: Parse text from PDF ───────────────────────────────────────────
     const pdfParse = (await import('pdf-parse')).default;
@@ -58,34 +113,29 @@ export async function POST(req: Request) {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
     // ── Step 3: Single Gemini call — parse resume AND map URLs ────────────────
-    // Passing rawUrls into the same prompt so Gemini maps each URL to the exact
-    // display text it was embedded in, using the resume text as context.
-    // This handles all cases: contact links, company websites, portfolio links, etc.
-
     const urlMappingSection = rawUrls.length > 0 ? `
+
 HYPERLINK MAPPING (CRITICAL):
 The following URLs were extracted from the PDF's hyperlink annotations. For each URL,
-identify the EXACT word or phrase it was embedded in within the resume text — this is
-the display text the author hyperlinked. Use the resume content as context to match
-each URL to its anchor text.
+identify the EXACT word or phrase it was embedded in within the resume — the display
+text the author hyperlinked. Use the resume content as context.
 
 Extracted URLs:
 ${rawUrls.map((u, i) => `${i + 1}. ${u}`).join('\n')}
 
-Return these as a "resolvedLinks" array at the top level of your JSON:
+Return these as "resolvedLinks" at the top level:
 "resolvedLinks": [
-  { "displayText": "exact word or phrase the URL was embedded in", "url": "the full URL" },
-  ...
+  { "displayText": "exact anchor text from resume", "url": "the full URL" }
 ]
 
-Rules for resolvedLinks:
-- displayText must be the EXACT text string from the resume (e.g. "LinkedIn", "Portfolio",
-  "Plexus Worldwide", "myportfolio.com") — never invent or paraphrase
-- If a URL is a known platform (linkedin.com, github.com, dribbble.com, behance.net, etc.)
-  use the platform name as displayText if not explicitly written
-- Include ALL extracted URLs — none should be omitted
-- If you cannot confidently identify the anchor text, use the domain name as displayText
-` : '';
+Rules:
+- displayText = EXACT text from resume (e.g. "LinkedIn", "Portfolio", "Plexus Worldwide")
+- For known platforms (linkedin.com, github.com, dribbble.com, behance.net, twitter.com,
+  medium.com, notion.so) use the platform name if no explicit anchor text found
+- Include ALL URLs — none omitted
+- Unknown domains: use the company or person name the URL most likely belongs to
+` : `
+"resolvedLinks": [],`;
 
     const prompt = `You are a resume parser. Read this resume text and return a single JSON object capturing EVERYTHING exactly as written.
 
@@ -97,44 +147,42 @@ CRITICAL RULES:
 - Capture sections in the ORDER they appear in the resume
 - Every bullet point must be its own string in an array — never merge or split bullets
 - For the contact object: look for any mention of LinkedIn, Portfolio, GitHub, website, or similar. Capture the display text and any URL visible in the text. If a URL is not visible but a platform name is (e.g. "LinkedIn"), set the url to "" and displayText to "LinkedIn"
-- Do NOT use emoji characters anywhere in your output — replace any ⭐ or similar with plain text marker "STAR:"
-- For experience entries: if a company name appears to have an associated website from the resolvedLinks, add a "companyUrl" field to that entry${urlMappingSection}
+- Do NOT use emoji characters anywhere — replace ⭐ or similar with "STAR:"
+- For experience entries: if a company has an associated URL from resolvedLinks, add "companyUrl" to that entry
+${urlMappingSection}
 
-Return this JSON structure — adapt sections array to whatever actually exists:
+Return this JSON structure:
 
 {
-  "resolvedLinks": [
-    { "displayText": "LinkedIn", "url": "https://linkedin.com/in/..." },
-    { "displayText": "Portfolio", "url": "https://..." }
-  ],
+  "resolvedLinks": [...],
   "contact": {
     "name": "full name",
-    "title": "professional title if shown at top of resume",
-    "email": "email address",
-    "phone": "phone number",
+    "title": "professional title",
+    "email": "email",
+    "phone": "phone",
     "location": "location",
     "links": [
-      { "displayText": "LinkedIn", "url": "https://linkedin.com/in/..." },
-      { "displayText": "Portfolio", "url": "https://..." }
+      { "displayText": "LinkedIn", "url": "" },
+      { "displayText": "Portfolio", "url": "" }
     ]
   },
   "sections": [
     {
-      "type": "exact section heading from resume or a clear label",
-      "data": <see format rules below>
+      "type": "exact section heading",
+      "data": {}
     }
   ]
 }
 
-Section data format rules:
-- Summary/Profile/Objective: { "paragraph": "...", "bullets": ["...", "..."] } — omit bullets key if none
-- Experience/Work History: { "entries": [ { "title": "...", "company": "...", "companyUrl": "https://... or empty string", "dates": "...", "location": "...", "bullets": ["...", "..."] } ] }
+Section data format:
+- Summary/Profile/Objective: { "paragraph": "...", "bullets": ["..."] }
+- Experience/Work History: { "entries": [ { "title": "...", "company": "...", "companyUrl": "", "dates": "...", "location": "...", "bullets": ["..."] } ] }
 - Skills: { "items": ["skill1", "skill2"] }
-- Education/Certifications: { "items": ["line1", "line2"] }
-- Achievements/Accomplishments: { "items": ["achievement text without emoji prefix", "..."] }
-- Any other section: { "items": ["line1", "line2"] }
+- Education/Certifications: { "items": ["line1"] }
+- Achievements/Accomplishments: { "items": ["achievement text"] }
+- Any other section: { "items": ["line1"] }
 
-Return only valid JSON. No markdown fences. No explanation.
+Return only valid JSON. No markdown. No explanation.
 
 Resume text:
 ${rawText}`;
@@ -159,89 +207,75 @@ ${rawText}`;
       parsedResume = JSON.parse(retryText);
     }
 
-    // ── Step 4: Merge resolvedLinks into contact.links ────────────────────────
-    // resolvedLinks is the authoritative source — it has URLs Gemini couldn't see
-    // in the text but we extracted from the binary.
-    // Strategy: for each resolvedLink, find matching contact.link by displayText
-    // (case-insensitive) and fill in the URL. Any unmatched resolvedLinks that
-    // look like contact/social links get added to contact.links.
+    // ── Step 4: Merge resolvedLinks → contact.links + experience companyUrls ──
     const resolvedLinks: { displayText: string; url: string }[] =
       parsedResume.resolvedLinks || [];
 
     const CONTACT_DOMAINS = [
       'linkedin', 'github', 'dribbble', 'behance', 'twitter', 'x.com',
       'instagram', 'portfolio', 'myportfolio', 'medium', 'notion',
+      'behance', 'figma', 'read.cv',
     ];
 
-    // Build a map of displayText → url from resolvedLinks for fast lookup
+    // Map displayText (lowercase) → url for fast lookup
     const resolvedMap = new Map<string, string>();
     resolvedLinks.forEach(rl => {
-      resolvedMap.set(rl.displayText.toLowerCase().trim(), rl.url);
+      if (rl.url) resolvedMap.set(rl.displayText.toLowerCase().trim(), rl.url);
     });
 
-    // Update contact.links with resolved URLs
+    // Backfill contact.links with resolved URLs
     const contactLinks = (parsedResume.contact?.links || []).map((cl: any) => {
       const resolved = resolvedMap.get(cl.displayText.toLowerCase().trim());
       return { ...cl, url: resolved || cl.url || '' };
     });
 
-    // Add any resolvedLinks not already in contactLinks that are contact-type
+    // Add any resolvedLinks not in contactLinks that are contact/social type
     resolvedLinks.forEach(rl => {
       const alreadyIn = contactLinks.some(
         (cl: any) => cl.displayText.toLowerCase() === rl.displayText.toLowerCase()
       );
-      if (!alreadyIn) {
+      if (!alreadyIn && rl.url) {
         const isContactType = CONTACT_DOMAINS.some(d =>
           rl.url.toLowerCase().includes(d) ||
           rl.displayText.toLowerCase().includes(d)
         );
-        if (isContactType) {
-          contactLinks.push({ displayText: rl.displayText, url: rl.url });
-        }
+        if (isContactType) contactLinks.push({ displayText: rl.displayText, url: rl.url });
       }
     });
 
-    // Update experience entries with companyUrls from resolvedLinks
+    // Update experience entries with companyUrls
     const sections = (parsedResume.sections || []).map((section: any) => {
       const k = (section.type || '').toLowerCase();
       if (!k.includes('experience') && !k.includes('work')) return section;
 
       const entries = (section.data?.entries || []).map((entry: any) => {
-        // If Gemini already set companyUrl, keep it
         if (entry.companyUrl) return entry;
-
-        // Try to find a resolvedLink whose displayText matches the company name
         const companyLower = (entry.company || '').toLowerCase().trim();
-        const match = resolvedLinks.find(rl =>
-          rl.displayText.toLowerCase().trim() === companyLower ||
-          // Also match if company name appears within the displayText
-          companyLower.includes(rl.displayText.toLowerCase().trim()) ||
-          rl.displayText.toLowerCase().trim().includes(companyLower)
-        );
-        return match ? { ...entry, companyUrl: match.url } : entry;
+        const match = resolvedLinks.find(rl => {
+          if (!rl.url) return false;
+          const dl = rl.displayText.toLowerCase().trim();
+          return dl === companyLower ||
+            companyLower.includes(dl) ||
+            dl.includes(companyLower);
+        });
+        return match ? { ...entry, companyUrl: match.url } : { ...entry, companyUrl: '' };
       });
 
       return { ...section, data: { ...section.data, entries } };
     });
 
-    // Rebuild parsedResume with all resolved data
     const finalResume = {
       ...parsedResume,
-      contact: {
-        ...parsedResume.contact,
-        links: contactLinks,
-      },
+      contact: { ...parsedResume.contact, links: contactLinks },
       sections,
     };
 
-    // Extract job titles from first experience section for search chips
+    // Extract job titles for search chips
     const expSection = finalResume.sections?.find((s: any) =>
       s.type?.toLowerCase().includes('experience') || s.type?.toLowerCase().includes('work')
     );
     const titles: string[] = expSection?.data?.entries
-      ?.slice(0, 3)
-      .map((e: any) => e.title)
-      .filter(Boolean) || [];
+      ?.slice(0, 3).map((e: any) => e.title).filter(Boolean) || [];
 
     const contact = {
       name: finalResume.contact?.name || '',
