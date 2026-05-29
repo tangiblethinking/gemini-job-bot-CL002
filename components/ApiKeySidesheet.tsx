@@ -5,9 +5,8 @@ import { useApp } from '@/context/AppContext';
 type KeyStatus = 'idle' | 'saving' | 'valid' | 'invalid';
 
 export default function ApiKeySidesheet() {
-  const { geminiKey, serperKey, setApiKeys } = useApp();
+  const { geminiKey, serperKey, setApiKeys, resetCount } = useApp();
 
-  // Session-only verified flag — resets on every page load and on resetAll
   const [keysVerifiedThisSession, setKeysVerifiedThisSession] = useState(false);
   const [geminiInput, setGeminiInput] = useState('');
   const [serperInput, setSerperInput] = useState('');
@@ -15,17 +14,24 @@ export default function ApiKeySidesheet() {
   const [status, setStatus] = useState<KeyStatus>('idle');
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Sync input fields whenever context keys change — including when resetAll clears them to ''
+  // Sync inputs when context keys change (initial hydration)
   useEffect(() => {
     setGeminiInput(geminiKey);
     setSerperInput(serperKey);
-    // If keys were cleared (reset), also clear verified state
-    if (!geminiKey && !serperKey) {
+  }, [geminiKey, serperKey]);
+
+  // React to reset — clear fields, close panel, reset verified state
+  // resetCount increments every time resetAll() is called
+  useEffect(() => {
+    if (resetCount > 0) {
+      setGeminiInput('');
+      setSerperInput('');
       setKeysVerifiedThisSession(false);
       setStatus('idle');
       setErrorMsg('');
+      setOpen(false); // close the panel if open
     }
-  }, [geminiKey, serperKey]);
+  }, [resetCount]);
 
   const handleSaveAndVerify = async () => {
     const g = geminiInput.trim();

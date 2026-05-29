@@ -33,6 +33,7 @@ interface AppContextType {
   setContact: (contact: Contact) => void;
   setJobs: (jobs: any[]) => void;
   resetAll: () => void;
+  resetCount: number;
 }
 
 const LS_KEYS = [
@@ -60,6 +61,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const [contact, setContactState] = useState<Contact>({ name: '' });
   const [jobs, setJobsState] = useState<any[]>([]);
   const [hydrated, setHydrated] = useState(false);
+  const [resetCount, setResetCount] = useState(0);
 
   useEffect(() => {
     const storedGemini = localStorage.getItem('gemini_api_key') || '';
@@ -170,6 +172,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     setProcessing({});
     setContactState({ name: '' });
     setJobsState([]);
+    setResetCount(c => c + 1);
   };
 
   if (!hydrated) return null;
@@ -179,7 +182,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
       geminiKey, serperKey, rawResumeText, parsedResume,
       searchTitles, appState, readyToApplyJobs, atsProcessing, contact, jobs,
       setApiKeys, setRawResumeText, setParsedResume, setSearchTitles,
-      setAppState, markJobReady, setAtsProcessing, setContact, setJobs, resetAll,
+      setAppState, markJobReady, setAtsProcessing, setContact, setJobs, resetAll, resetCount,
     }}>
       {children}
     </AppContext.Provider>
