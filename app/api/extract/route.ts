@@ -15,7 +15,35 @@ interface ResolvedLink {
  * (PDF 1.5+) which raw buffer regex cannot reach.
  */
 async function extractLinksFromPdf(buffer: Buffer): Promise<ResolvedLink[]> {
-  // Dynamic import — pdfjs-dist is ESM only
+  // Polyfill browser globals required by pdfjs-dist before importing.
+  // Vercel's Node 18 runtime lacks DOMMatrix, ImageData, Path2D.
+  // Node 20+ has DOMMatrix but we polyfill defensively for all versions.
+  if (typeof (globalThis as any).DOMMatrix === 'undefined') {
+    (globalThis as any).DOMMatrix = class DOMMatrix {
+      a=1; b=0; c=0; d=1; e=0; f=0;
+      static fromMatrix() { return new (globalThis as any).DOMMatrix(); }
+      multiply() { return this; }
+      translate() { return this; }
+      scale() { return this; }
+      rotate() { return this; }
+      inverse() { return this; }
+      transformPoint(p: any) { return p || { x: 0, y: 0 }; }
+    };
+  }
+  if (typeof (globalThis as any).ImageData === 'undefined') {
+    (globalThis as any).ImageData = class ImageData {
+      width: number; height: number; data: Uint8ClampedArray;
+      constructor(w: number, h: number) {
+        this.width = w; this.height = h;
+        this.data = new Uint8ClampedArray(w * h * 4);
+      }
+    };
+  }
+  if (typeof (globalThis as any).Path2D === 'undefined') {
+    (globalThis as any).Path2D = class Path2D {};
+  }
+
+  // Dynamic import after polyfills are in place
   const { getDocument, GlobalWorkerOptions } = await import(
     'pdfjs-dist/legacy/build/pdf.mjs' as any
   );
