@@ -48,12 +48,11 @@ async function extractLinksFromPdf(buffer: Buffer): Promise<ResolvedLink[]> {
     'pdfjs-dist/legacy/build/pdf.mjs' as any
   );
 
-  // In Node.js serverless with pdfjs-dist as external package,
-  // set workerSrc to a non-empty string to satisfy the check.
-  // The legacy build runs the worker inline (fake worker) when the src
-  // doesn't resolve to an actual separate worker thread — which is fine
-  // for serverless Node environments.
-  GlobalWorkerOptions.workerSrc = 'pdfjs-dist/legacy/build/pdf.worker.mjs';
+  // Build absolute path to worker using process.cwd() which resolves to /var/task
+  // on Vercel — where node_modules ARE present after outputFileTracingIncludes.
+  // Use file:// URL so pdfjs can load it as an ES module worker.
+  const workerPath = `${process.cwd()}/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs`;
+  GlobalWorkerOptions.workerSrc = `file://${workerPath}`;
 
   const data = new Uint8Array(buffer);
   const doc = await getDocument({
