@@ -17,7 +17,6 @@ function stripEmoji(text: string): string {
     .replace(/[\u{1FA00}-\u{1FA9F}]/gu, '')
     .replace(/^STAR:\s*/i, '')
     .replace(/^⭐\s*/g, '')
-    // Strip any markdown bold/italic Gemini might output
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
@@ -169,21 +168,18 @@ function mergeByIndex(sections: any[], rewritten: any): any[] {
   });
 }
 
-function buildHTML(resume: any, jobTitle?: string): string {
+function buildHTML(resume: any, atsTitle: string, jobTitle?: string): string {
   const c = resume.contact || {};
   const links: any[] = c.links || [];
 
-  // Build contact line — always render links, use anchor only if URL present
   const contactParts: string[] = [];
   if (c.phone) contactParts.push(`<span>${c.phone}</span>`);
   if (c.email) contactParts.push(`<span><a href="mailto:${c.email}">${c.email}</a></span>`);
   links.forEach((l: any) => {
     if (l.url && l.url.trim()) {
-      // Ensure URL has protocol
       const href = l.url.startsWith('http') ? l.url : `https://${l.url}`;
       contactParts.push(`<span><a href="${href}" target="_blank">${l.displayText || l.url}</a></span>`);
     } else if (l.displayText && l.displayText.trim()) {
-      // No URL captured (PDF limitation) — render as plain text
       contactParts.push(`<span>${l.displayText}</span>`);
     }
   });
@@ -276,9 +272,6 @@ function buildHTML(resume: any, jobTitle?: string): string {
     return '';
   }).join('');
 
-  // Subtitle shows candidate's professional title (from resume), NOT the job listing title
-  const candidateTitle = c.title || '';
-
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -295,34 +288,30 @@ body {
 }
 a { color: inherit; text-decoration: none; }
 a:hover { text-decoration: underline; }
-/* Print/back bar — fixed top */
 .action-bar {
   position: fixed; top: 0; left: 0; right: 0;
   background: #1a1a1a; color: white;
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 20px; gap: 12px; z-index: 100;
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-  flex-wrap: wrap;
 }
 .action-bar-left { display: flex; align-items: center; gap: 10px; }
 .action-bar-right { display: flex; align-items: center; gap: 8px; }
-.action-bar span.label { font-size: 12px; opacity: 0.6; white-space: nowrap; }
+.action-bar span.label { font-size: 12px; opacity: 0.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
 .btn-back {
   background: rgba(255,255,255,0.12); color: white; border: 1px solid rgba(255,255,255,0.2);
-  border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer;
-  white-space: nowrap;
+  border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer; white-space: nowrap;
 }
 .btn-back:hover { background: rgba(255,255,255,0.2); }
 .btn-print {
   background: #007aff; color: white; border: none;
-  border-radius: 8px; padding: 7px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
-  white-space: nowrap;
+  border-radius: 8px; padding: 7px 18px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
 }
 .btn-print:hover { background: #0066dd; }
 .resume-body { margin-top: 52px; }
 .header { margin-bottom: 20px; border-bottom: 2px solid #1a1a1a; padding-bottom: 14px; }
 .header-name { font-size: 22pt; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 3px; }
-.header-title { font-size: 11pt; font-weight: 500; color: #444; margin-bottom: 8px; line-height: 1.4; }
+.header-title { font-size: 10.5pt; font-weight: 500; color: #444; margin-bottom: 8px; line-height: 1.5; }
 .header-contact { font-size: 9.5pt; color: #555; display: flex; flex-wrap: wrap; gap: 4px 0; }
 .header-contact span::after { content: ' · '; color: #bbb; white-space: pre; }
 .header-contact span:last-child::after { content: ''; }
@@ -359,6 +348,7 @@ a:hover { text-decoration: underline; }
   .job-header { flex-direction: column; gap: 2px; }
   .job-right { text-align: left; }
   .action-bar { padding: 8px 16px; }
+  .action-bar span.label { display: none; }
 }
 @media print {
   .action-bar { display: none; }
@@ -381,7 +371,7 @@ a:hover { text-decoration: underline; }
 <div class="resume-body">
 <div class="header">
   <div class="header-name">${c.name || ''}</div>
-  ${candidateTitle ? `<div class="header-title">${candidateTitle}</div>` : ''}
+  ${atsTitle ? `<div class="header-title">${atsTitle}</div>` : ''}
   <div class="header-contact">${contactParts.join('')}</div>
 </div>
 ${sectionsHtml}
@@ -404,13 +394,39 @@ export async function POST(req: Request) {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-    // Step 1 — Extract ATS keywords
+    // Step 1 — Extract ATS keywords AND role descriptor phrases for title line
+    // Single call returns both — no extra latency
     const kwRes = await model.generateContent(
-      `Extract the top 25 most important ATS keywords and phrases from this job description. Include skills, tools, methodologies, role-specific terms, and strong action verbs. Return ONLY a JSON array of strings — no markdown, no explanation.\n\n${jdText}`
+      `Analyze this job description and return a JSON object with two keys:
+
+1. "keywords": array of the top 25 ATS keywords and phrases (skills, tools, methodologies, role-specific terms, action verbs)
+2. "titleDescriptors": array of 2–4 short role descriptor phrases that naturally extend a professional title line on a resume. These should be drawn from the JD's required skills, specialties, or focus areas — terms that read as professional specializations (e.g. "Design Systems", "Product Strategy", "AI Experience Design", "Systems Architecture"). They must be concise (1–3 words each), title-case, and sound natural when pipe-separated after a job title like: "Senior Product Designer | Design Systems | AI Experience". Do NOT include generic terms like "Leadership" or "Communication".
+
+Return ONLY valid JSON, no markdown, no explanation.
+
+Job description:
+${jdText}`
     );
+
     let kwText = kwRes.response.text().trim();
     if (kwText.startsWith('`')) kwText = kwText.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
-    const keywords: string[] = JSON.parse(kwText);
+
+    let keywords: string[] = [];
+    let titleDescriptors: string[] = [];
+
+    try {
+      const parsed = JSON.parse(kwText);
+      keywords = Array.isArray(parsed.keywords) ? parsed.keywords : [];
+      titleDescriptors = Array.isArray(parsed.titleDescriptors) ? parsed.titleDescriptors : [];
+    } catch {
+      // Fallback: treat entire response as flat keyword array
+      try { keywords = JSON.parse(kwText); } catch { keywords = []; }
+    }
+
+    // Build the ATS title line: JD job title + pipe-separated descriptors
+    // e.g. "Director, UX Design | Design Systems | Product Strategy | AI Experience"
+    const atsTitleParts = [jobTitle, ...titleDescriptors].filter(Boolean);
+    const atsTitle = atsTitleParts.join(' | ');
 
     // Step 2 — Build rewrite prompt
     const sections = parsedResume.sections || [];
@@ -437,8 +453,8 @@ export async function POST(req: Request) {
     const mergedSections = mergeByIndex(sections, rewritten);
     const mergedResume = { ...parsedResume, sections: mergedSections };
 
-    // Step 5 — Build HTML (pass jobTitle for action bar label only, NOT for header name)
-    const html = buildHTML(mergedResume, jobTitle);
+    // Step 5 — Build HTML with atsTitle in header, jobTitle in action bar only
+    const html = buildHTML(mergedResume, atsTitle, jobTitle);
     return NextResponse.json({ html });
 
   } catch (error) {

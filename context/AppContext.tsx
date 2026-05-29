@@ -32,7 +32,19 @@ interface AppContextType {
   setAtsProcessing: (jobUrl: string, val: boolean) => void;
   setContact: (contact: Contact) => void;
   setJobs: (jobs: any[]) => void;
+  resetAll: () => void;
 }
+
+const LS_KEYS = [
+  'gemini_api_key',
+  'serper_api_key',
+  'parsed_resume',
+  'search_titles',
+  'resume_contact',
+  'raw_resume_text',
+  'jobs_results',
+  'ready_to_apply_jobs',
+];
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
@@ -49,9 +61,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const [jobs, setJobsState] = useState<any[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
-  // Rehydrate from localStorage on mount
   useEffect(() => {
-    // Keys — restore to state but NOT treated as verified this session
     const storedGemini = localStorage.getItem('gemini_api_key') || '';
     const storedSerper = localStorage.getItem('serper_api_key') || '';
     setGeminiKey(storedGemini);
@@ -68,7 +78,6 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
       try {
         const pr = JSON.parse(storedResume);
         setParsedResumeState(pr);
-        // Restore to RESULTS if jobs exist, otherwise PARSED
         if (storedJobs) {
           try {
             const parsedJobs = JSON.parse(storedJobs);
@@ -82,18 +91,12 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
         } else {
           setAppState('PARSED');
         }
-      } catch { /* ignore corrupt data */ }
+      } catch { /* ignore */ }
     }
 
-    if (storedTitles) {
-      try { setSearchTitlesState(JSON.parse(storedTitles)); } catch { /* ignore */ }
-    }
-    if (storedContact) {
-      try { setContactState(JSON.parse(storedContact)); } catch { /* ignore */ }
-    }
-    if (storedRawText) {
-      setRawResumeTextState(storedRawText);
-    }
+    if (storedTitles) { try { setSearchTitlesState(JSON.parse(storedTitles)); } catch { /* ignore */ } }
+    if (storedContact) { try { setContactState(JSON.parse(storedContact)); } catch { /* ignore */ } }
+    if (storedRawText) { setRawResumeTextState(storedRawText); }
     if (storedReady) {
       try {
         const arr = JSON.parse(storedReady);
@@ -118,7 +121,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const setParsedResume = (resume: any) => {
     if (resume) {
-      try { localStorage.setItem('parsed_resume', JSON.stringify(resume)); } catch { /* storage full */ }
+      try { localStorage.setItem('parsed_resume', JSON.stringify(resume)); } catch { /* ignore */ }
     }
     setParsedResumeState(resume);
   };
@@ -154,6 +157,21 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     setProcessing(prev => ({ ...prev, [jobUrl]: val }));
   };
 
+  // Reset everything to factory default
+  const resetAll = () => {
+    LS_KEYS.forEach(k => localStorage.removeItem(k));
+    setGeminiKey('');
+    setSerperKey('');
+    setRawResumeTextState('');
+    setParsedResumeState(null);
+    setSearchTitlesState([]);
+    setAppState('IDLE');
+    setReadyToApplyJobs(new Set());
+    setProcessing({});
+    setContactState({ name: '' });
+    setJobsState([]);
+  };
+
   if (!hydrated) return null;
 
   return (
@@ -161,7 +179,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
       geminiKey, serperKey, rawResumeText, parsedResume,
       searchTitles, appState, readyToApplyJobs, atsProcessing, contact, jobs,
       setApiKeys, setRawResumeText, setParsedResume, setSearchTitles,
-      setAppState, markJobReady, setAtsProcessing, setContact, setJobs,
+      setAppState, markJobReady, setAtsProcessing, setContact, setJobs, resetAll,
     }}>
       {children}
     </AppContext.Provider>
