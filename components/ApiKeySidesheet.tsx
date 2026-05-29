@@ -2,73 +2,66 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 
-type KeyStatus = 'idle' | 'checking' | 'valid' | 'invalid';
+type KeyStatus = 'idle' | 'saving' | 'valid' | 'invalid';
 
 export default function ApiKeySidesheet() {
   const { geminiKey, serperKey, setApiKeys } = useApp();
 
-  // Session-only verified state — resets on every page load
   const [keysVerifiedThisSession, setKeysVerifiedThisSession] = useState(false);
-
-  // Input fields auto-populate from saved keys so user can just hit Verify
   const [geminiInput, setGeminiInput] = useState('');
   const [serperInput, setSerperInput] = useState('');
   const [open, setOpen] = useState(false);
-  const [geminiStatus, setGeminiStatus] = useState<KeyStatus>('idle');
-  const [serperStatus, setSerperStatus] = useState<KeyStatus>('idle');
+  const [status, setStatus] = useState<KeyStatus>('idle');
+  const [errorMsg, setErrorMsg] = useState('');
 
-  // Populate fields when context hydrates
+  // Auto-populate from saved keys on hydration
   useEffect(() => {
     if (geminiKey) setGeminiInput(geminiKey);
     if (serperKey) setSerperInput(serperKey);
   }, [geminiKey, serperKey]);
 
-  const handleSave = () => {
-    setApiKeys(geminiInput.trim(), serperInput.trim());
-    setGeminiStatus('idle');
-    setSerperStatus('idle');
-    setKeysVerifiedThisSession(false);
-    setOpen(false);
-  };
+  const handleSaveAndVerify = async () => {
+    const g = geminiInput.trim();
+    const s = serperInput.trim();
+    if (!g || !s) {
+      setErrorMsg('Both keys are required.');
+      setStatus('invalid');
+      return;
+    }
 
-  const verifyKeys = async () => {
-    setGeminiStatus('checking');
-    setSerperStatus('checking');
+    setStatus('saving');
+    setErrorMsg('');
+
     try {
       const res = await fetch('/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          geminiKey: geminiInput.trim(),
-          serperKey: serperInput.trim(),
-        }),
+        body: JSON.stringify({ geminiKey: g, serperKey: s }),
       });
       const data = await res.json();
       const gValid = data.gemini === 'valid';
       const sValid = data.serper === 'valid';
-      setGeminiStatus(gValid ? 'valid' : 'invalid');
-      setSerperStatus(sValid ? 'valid' : 'invalid');
+
       if (gValid && sValid) {
-        // Auto-save on successful verify and mark session as verified
-        setApiKeys(geminiInput.trim(), serperInput.trim());
+        setApiKeys(g, s);
         setKeysVerifiedThisSession(true);
+        setStatus('valid');
+        setOpen(false);
+      } else {
+        setStatus('invalid');
+        const problems = [];
+        if (!gValid) problems.push('Gemini key is invalid');
+        if (!sValid) problems.push('Serper key is invalid');
+        setErrorMsg(problems.join(' · '));
       }
     } catch {
-      setGeminiStatus('invalid');
-      setSerperStatus('invalid');
+      setStatus('invalid');
+      setErrorMsg('Could not reach verification endpoint. Check your connection.');
     }
   };
 
-  const statusBadge = (status: KeyStatus) => {
-    if (status === 'checking') return <span className="text-xs text-amber-600">Checking...</span>;
-    if (status === 'valid') return <span className="text-xs text-green-600">✓ Valid</span>;
-    if (status === 'invalid') return <span className="text-xs text-red-500">✗ Invalid</span>;
-    return null;
-  };
-
-  // Button is green ONLY if verified this session — not just because keys exist in storage
-  const showVerified = keysVerifiedThisSession;
   const hasStoredKeys = !!(geminiKey && serperKey);
+  const showVerified = keysVerifiedThisSession;
 
   return (
     <>
@@ -93,18 +86,20 @@ export default function ApiKeySidesheet() {
               <button onClick={() => setOpen(false)} className="text-gray-400 hover:text-gray-700 text-2xl leading-none">×</button>
             </div>
 
-            {hasStoredKeys && !showVerified && (
+            {hasStoredKeys && !showVerified && status === 'idle' && (
               <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-xl px-3 py-2">
-                Keys are saved but not verified this session. Click Verify to confirm they're active.
+                Keys are saved but not verified this session. Save to verify they're still active.
+              </div>
+            )}
+
+            {status === 'invalid' && errorMsg && (
+              <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl px-3 py-2">
+                {errorMsg}
               </div>
             )}
 
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <label className="text-gray-500 text-sm">Gemini API Key</label>
-                {statusBadge(geminiStatus)}
-              </div>
-              {/* type="text" + autoComplete="off" prevents mobile password manager prompts */}
+              <label className="text-gray-500 text-sm">Gemini API Key</label>
               <input
                 type="text"
                 inputMode="text"
@@ -114,17 +109,22 @@ export default function ApiKeySidesheet() {
                 spellCheck={false}
                 data-form-type="other"
                 value={geminiInput}
-                onChange={e => { setGeminiInput(e.target.value); setKeysVerifiedThisSession(false); }}
+                onChange={e => { setGeminiInput(e.target.value); setStatus('idle'); setErrorMsg(''); setKeysVerifiedThisSession(false); }}
                 placeholder="AIza..."
                 className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 w-full font-mono"
               />
+              <a
+                href="https://aistudio.google.com/app/apikey"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-blue-500 hover:underline"
+              >
+                Get Gemini key ↗
+              </a>
             </div>
 
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <label className="text-gray-500 text-sm">Serper API Key</label>
-                {statusBadge(serperStatus)}
-              </div>
+              <label className="text-gray-500 text-sm">Serper API Key</label>
               <input
                 type="text"
                 inputMode="text"
@@ -134,25 +134,30 @@ export default function ApiKeySidesheet() {
                 spellCheck={false}
                 data-form-type="other"
                 value={serperInput}
-                onChange={e => { setSerperInput(e.target.value); setKeysVerifiedThisSession(false); }}
+                onChange={e => { setSerperInput(e.target.value); setStatus('idle'); setErrorMsg(''); setKeysVerifiedThisSession(false); }}
                 placeholder="Enter Serper key..."
                 className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 w-full font-mono"
               />
+              <a
+                href="https://serper.dev"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-blue-500 hover:underline"
+              >
+                Get Serper key ↗
+              </a>
             </div>
 
             <button
-              onClick={verifyKeys}
-              disabled={geminiStatus === 'checking' || serperStatus === 'checking'}
-              className="bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-700 text-sm px-4 py-2 rounded-xl border border-gray-200 transition"
+              onClick={handleSaveAndVerify}
+              disabled={status === 'saving'}
+              className={`mt-auto font-medium px-4 py-3 rounded-xl text-sm transition ${
+                status === 'saving'
+                  ? 'bg-gray-300 text-gray-500 cursor-wait'
+                  : 'bg-gray-900 hover:bg-gray-800 text-white'
+              }`}
             >
-              Verify Keys
-            </button>
-
-            <button
-              onClick={handleSave}
-              className="mt-auto bg-gray-900 hover:bg-gray-800 text-white font-medium px-4 py-2 rounded-xl text-sm transition"
-            >
-              Save Keys
+              {status === 'saving' ? 'Verifying...' : 'Save Keys'}
             </button>
           </div>
         </div>

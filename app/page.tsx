@@ -96,7 +96,7 @@ export default function Page() {
     <>
       <TopNav />
       <ApiKeySidesheet />
-      <main className="max-w-3xl mx-auto px-6 py-12">
+      <main className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
 
         {appState === 'IDLE' && (
           <div className="text-center py-16">

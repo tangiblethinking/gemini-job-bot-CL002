@@ -1,5 +1,5 @@
 "use client";
-import React, { useRef } from 'react';
+import React, { useRef, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 
 interface Job {
@@ -9,75 +9,115 @@ interface Job {
   source: string;
 }
 
-const RESUME_PAGE_HTML = (jobTitle: string, resumeHtml: string) => {
-  // Inject the resume HTML directly — replace the body content with the resume
-  // but keep our wrapper with print bar and back button
-  const bodyMatch = resumeHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-  const bodyContent = bodyMatch ? bodyMatch[1] : resumeHtml;
-  const styleMatch = resumeHtml.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
-  const resumeStyles = styleMatch ? styleMatch[1] : '';
+// Inline resume overlay rendered inside the Next.js page — no navigation, no history loss
+function ResumeOverlay({ html, onClose }: { html: string; onClose: () => void }) {
+  useEffect(() => {
+    // Push a history entry so the browser back button triggers popstate
+    window.history.pushState({ resumeOverlay: true }, '');
+    const handlePop = () => onClose();
+    window.addEventListener('popstate', handlePop);
+    // Prevent body scroll while overlay is open
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('popstate', handlePop);
+      document.body.style.overflow = '';
+    };
+  }, [onClose]);
 
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ATS Resume — ${jobTitle}</title>
-<style>
-${resumeStyles}
-</style>
-</head>
-<body>
-${bodyContent}
-</body>
-</html>`;
-};
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 9999,
+        background: '#fff',
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+    >
+      {/* Action bar */}
+      <div
+        style={{
+          background: '#1a1a1a',
+          color: '#fff',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '10px 16px',
+          gap: 10,
+          flexShrink: 0,
+        }}
+      >
+        <button
+          onClick={onClose}
+          style={{
+            background: 'rgba(255,255,255,0.12)',
+            color: '#fff',
+            border: '1px solid rgba(255,255,255,0.2)',
+            borderRadius: 8,
+            padding: '6px 14px',
+            fontSize: 13,
+            cursor: 'pointer',
+          }}
+        >
+          ← Back to Results
+        </button>
+        <button
+          onClick={() => window.print()}
+          style={{
+            background: '#007aff',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 8,
+            padding: '7px 18px',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          Save as PDF
+        </button>
+      </div>
+      {/* Resume content in scrollable iframe-like container */}
+      <div
+        style={{ flex: 1, overflow: 'auto', background: '#fff' }}
+        dangerouslySetInnerHTML={{ __html: extractBody(html) }}
+      />
+    </div>
+  );
+}
+
+// Extract just the body content + styles from generated HTML for safe inline rendering
+function extractBody(html: string): string {
+  const styleMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  const styles = styleMatch ? `<style>${styleMatch[1].replace(/\.action-bar[\s\S]*?}/, '').replace(/\.resume-body[^}]*}/, '')}</style>` : '';
+  const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+  let body = bodyMatch ? bodyMatch[1] : html;
+  // Remove the action-bar div since we render our own
+  body = body.replace(/<div class="action-bar">[\s\S]*?<\/div>\s*<div class="resume-body">/, '<div class="resume-body" style="margin-top:0">');
+  return styles + body;
+}
 
 const LOADING_HTML = (jobTitle: string) => `<!DOCTYPE html>
 <html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Generating Resume — Ape X Job Hunt</title>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Generating Resume</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:20px;padding:24px;text-align:center}
-img{width:120px;opacity:.85}
-.title{font-size:15px;color:#555;letter-spacing:.01em}
-.job{font-size:13px;color:#888;max-width:320px;line-height:1.4}
-.dots::after{content:'';animation:dots 1.4s steps(4,end) infinite}
-@keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
-</style>
-</head>
+body{font-family:-apple-system,sans-serif;background:#f5f5f7;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:20px;padding:24px;text-align:center}
+img{width:100px;opacity:.85}
+p{font-size:14px;color:#555}
+small{font-size:12px;color:#888;max-width:300px;line-height:1.4}
+.dots::after{content:'';animation:d 1.4s steps(4,end) infinite}
+@keyframes d{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
+</style></head>
 <body>
-<img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X" />
-<p class="title">Generating your ATS resume<span class="dots"></span></p>
-<p class="job">${jobTitle}</p>
-</body>
-</html>`;
+<img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X"/>
+<p>Generating ATS resume<span class="dots"></span></p>
+<small>${jobTitle}</small>
+</body></html>`;
 
-const ERROR_HTML = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Error — Ape X Job Hunt</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px;background:#f5f5f7;padding:24px;text-align:center}
-img{width:100px;opacity:.5}
-p{font-size:14px;color:#c00}
-small{font-size:12px;color:#999}
-.back-btn{margin-top:8px;background:#1a1a1a;color:white;border:none;border-radius:10px;padding:10px 24px;font-size:14px;cursor:pointer}
-</style>
-</head>
-<body>
-<img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X" />
-<p>Resume generation failed.</p>
-<small>Please go back and try again.</small>
-<button class="back-btn" onclick="window.history.back()">← Go Back</button>
-</body>
-</html>`;
+const ERROR_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px;background:#f5f5f7;padding:24px;text-align:center}img{width:80px;opacity:.4}p{font-size:14px;color:#c00}small{font-size:12px;color:#999}.b{background:#1a1a1a;color:#fff;border:none;border-radius:10px;padding:10px 24px;font-size:14px;cursor:pointer;margin-top:8px}</style></head><body><img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X"/><p>Resume generation failed.</p><small>Please go back and try again.</small><button class="b" onclick="window.history.back()">← Go Back</button></body></html>`;
 
 function isMobile(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -101,6 +141,7 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
   } = useApp();
 
   const generatedHtmlRef = useRef<Map<string, string>>(new Map());
+  const [overlayHtml, setOverlayHtml] = React.useState<string | null>(null);
 
   async function runATS(job: Job): Promise<string> {
     const jdRes = await fetch('/api/jd-extract', {
@@ -117,20 +158,20 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
         'Content-Type': 'application/json',
         'x-gemini-key': geminiKey,
       },
-      body: JSON.stringify({ jobText, snippet: job.snippet, parsedResume }),
+      // Pass jobTitle so it shows in the action bar label (not in resume header)
+      body: JSON.stringify({ jobText, snippet: job.snippet, parsedResume, jobTitle: job.title }),
     });
     const atsData = await atsRes.json();
     if (!atsData.html) throw new Error(atsData.error || 'No HTML returned');
     return atsData.html;
   }
 
-  // DESKTOP: open blank tab, write loading screen, replace with result
+  // DESKTOP: new tab
   function handleDesktop(job: Job) {
     const tab = window.open('', '_blank');
     if (!tab) return;
     writeToTab(tab, LOADING_HTML(job.title));
     setAtsProcessing(job.link, true);
-
     runATS(job)
       .then(html => {
         writeToTab(tab, html);
@@ -141,31 +182,21 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
       .finally(() => setAtsProcessing(job.link, false));
   }
 
-  // MOBILE: navigate current tab to loading screen, then replace with resume
-  // State is persisted to localStorage so back navigation restores RESULTS
+  // MOBILE: in-page overlay — no navigation, back button works via popstate
   function handleMobile(job: Job) {
     setAtsProcessing(job.link, true);
-
-    // Show loading screen in current tab immediately
-    document.open();
-    document.write(LOADING_HTML(job.title));
-    document.close();
+    // Show a minimal loading overlay while generating
+    setOverlayHtml('<div style="display:flex;align-items:center;justify-content:center;height:100%;font-family:-apple-system,sans-serif;color:#555;font-size:14px;flex-direction:column;gap:12px"><p>Generating resume...</p><small style="color:#999;font-size:12px">' + job.title + '</small></div>');
 
     runATS(job)
       .then(html => {
-        // Replace current tab content with resume — has print bar built in
-        document.open();
-        document.write(html);
-        document.close();
-        // Store in sessionStorage so reopen works if user navigates back
-        try { sessionStorage.setItem(`resume_${job.link}`, html); } catch { /* ignore */ }
         generatedHtmlRef.current.set(job.link, html);
         markJobReady(job.link);
+        setOverlayHtml(html);
       })
       .catch(() => {
-        document.open();
-        document.write(ERROR_HTML);
-        document.close();
+        setOverlayHtml(null);
+        alert('Resume generation failed. Please try again.');
       })
       .finally(() => setAtsProcessing(job.link, false));
   }
@@ -182,9 +213,7 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
     const html = generatedHtmlRef.current.get(job.link);
     if (!html) return;
     if (isMobile()) {
-      document.open();
-      document.write(html);
-      document.close();
+      setOverlayHtml(html);
     } else {
       const tab = window.open('', '_blank');
       if (tab) writeToTab(tab, html);
@@ -201,67 +230,78 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      {jobs.map((job, i) => {
-        const isDone = readyToApplyJobs.has(job.link);
-        const isProcessing = atsProcessing[job.link];
-        return (
-          <div
-            key={i}
-            className="bg-white border border-gray-200 rounded-2xl p-4 sm:p-5 hover:border-gray-300 transition"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                  <h3 className="font-semibold text-gray-900 text-sm leading-snug">{job.title}</h3>
-                  {isDone && (
-                    <span className="inline-flex items-center gap-1 text-xs bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded-full whitespace-nowrap">
-                      ✓ Resume ready
-                    </span>
+    <>
+      {/* Mobile resume overlay */}
+      {overlayHtml && (
+        <ResumeOverlay
+          html={overlayHtml}
+          onClose={() => setOverlayHtml(null)}
+        />
+      )}
+
+      <div className="flex flex-col gap-3">
+        {jobs.map((job, i) => {
+          const isDone = readyToApplyJobs.has(job.link);
+          const isProcessing = atsProcessing[job.link];
+          return (
+            <div
+              key={i}
+              className="bg-white border border-gray-200 rounded-2xl p-4 hover:border-gray-300 transition w-full"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <h3 className="font-semibold text-gray-900 text-sm leading-snug">{job.title}</h3>
+                    {isDone && (
+                      <span className="inline-flex items-center gap-1 text-xs bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded-full whitespace-nowrap">
+                        ✓ Resume ready
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-blue-600 text-xs mb-2">{job.source}</p>
+                  <p className="text-gray-500 text-sm leading-relaxed line-clamp-3">{job.snippet}</p>
+                  {isProcessing && (
+                    <p className="text-amber-600 text-xs mt-2 animate-pulse">
+                      Generating resume — takes ~30 seconds...
+                    </p>
                   )}
                 </div>
-                <p className="text-blue-600 text-xs mb-2">{job.source}</p>
-                <p className="text-gray-500 text-sm leading-relaxed line-clamp-3">{job.snippet}</p>
-                {isProcessing && (
-                  <p className="text-amber-600 text-xs mt-2 animate-pulse">
-                    Generating resume — this takes about 30 seconds...
-                  </p>
-                )}
-              </div>
-              <div className="flex flex-col gap-2 shrink-0">
-                <a
-                  href={job.link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-700 px-3 py-2 rounded-xl text-center transition whitespace-nowrap"
-                >
-                  View Job
-                </a>
-                {isDone ? (
-                  <button
-                    onClick={() => handleReopenResume(job)}
-                    className="text-xs font-medium px-3 py-2 rounded-xl transition whitespace-nowrap bg-green-50 border border-green-200 text-green-700 hover:bg-green-100"
+                {/* Button column — fixed width, never shrinks */}
+                <div className="flex flex-col gap-2" style={{ flexShrink: 0, minWidth: 0 }}>
+                  <a
+                    href={job.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-700 px-3 py-2 rounded-xl text-center transition whitespace-nowrap block"
                   >
-                    ↗ Resume done
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => !isProcessing && handleATS(job)}
-                    disabled={isProcessing}
-                    className={`text-xs font-medium px-3 py-2 rounded-xl transition whitespace-nowrap ${
-                      isProcessing
-                        ? 'bg-gray-900 text-white opacity-60 cursor-wait'
-                        : 'bg-gray-900 hover:bg-gray-800 text-white active:bg-gray-700'
-                    }`}
-                  >
-                    {isProcessing ? 'Generating...' : 'ATS Resume'}
-                  </button>
-                )}
+                    View Job
+                  </a>
+                  {isDone ? (
+                    <button
+                      onClick={() => handleReopenResume(job)}
+                      className="text-xs font-medium px-3 py-2 rounded-xl transition whitespace-nowrap bg-green-50 border border-green-200 text-green-700 hover:bg-green-100"
+                    >
+                      ↗ Resume done
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => !isProcessing && handleATS(job)}
+                      disabled={isProcessing}
+                      className={`text-xs font-medium px-3 py-2 rounded-xl transition whitespace-nowrap ${
+                        isProcessing
+                          ? 'bg-gray-900 text-white opacity-60 cursor-wait'
+                          : 'bg-gray-900 hover:bg-gray-800 text-white active:bg-gray-700'
+                      }`}
+                    >
+                      {isProcessing ? 'Generating...' : 'ATS Resume'}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+    </>
   );
 }

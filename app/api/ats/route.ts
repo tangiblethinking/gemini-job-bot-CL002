@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const STAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="#f59e0b" stroke="#f59e0b" stroke-width="1" style="display:inline;vertical-align:-2px;margin-right:5px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
+// Monochrome filled star — no color, no emoji
+const STAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="#333" stroke="#333" stroke-width="1" style="display:inline;vertical-align:-2px;margin-right:5px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
 
 function normalizeKey(type: string): string {
   return (type || '').toLowerCase().trim();
@@ -11,9 +12,12 @@ function stripEmoji(text: string): string {
   return text
     .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
     .replace(/[\u2600-\u27BF]/g, '')
+    .replace(/[\u{2700}-\u{27BF}]/gu, '')
+    .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')
+    .replace(/[\u{1FA00}-\u{1FA9F}]/gu, '')
     .replace(/^STAR:\s*/i, '')
     .replace(/^⭐\s*/g, '')
-    // Strip markdown bold/italic markers that AI might insert
+    // Strip any markdown bold/italic Gemini might output
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
@@ -29,32 +33,35 @@ function isRewriteable(type: string): boolean {
 function buildRewritePrompt(sections: any[], keywords: string[]): string {
   const rewriteableSections = sections.filter(s => isRewriteable(s.type));
 
-  let prompt = `You are a senior career strategist and executive resume writer with deep expertise in ATS optimization. Your task is to rewrite the resume content below so it reads as a polished, high-impact professional document while seamlessly incorporating the provided ATS keywords.
+  let prompt = `You are a senior career strategist and executive resume writer with deep expertise in ATS optimization. Rewrite the resume content below as a polished, high-impact professional document that naturally incorporates the provided ATS keywords.
 
-WRITING STYLE REQUIREMENTS:
-- Write in the voice of an accomplished professional — confident, precise, results-oriented
-- Use strong action verbs consistent with resume convention (Led, Drove, Architected, Delivered, Secured, etc.) — no first-person "I"
-- Each rewritten bullet must preserve the original achievement's meaning, metrics, and sentiment, while naturally weaving in the relevant ATS language
-- Keywords are vocabulary to draw from — integrate them into the natural flow of sentences; do NOT insert them as standalone terms, do NOT bold them, do NOT wrap them in asterisks, quotation marks, or any other markers
-- Every sentence must read as if a skilled human writer crafted it specifically for this role — never mechanical, never keyword-stuffed
-- Preserve ALL metrics, percentages, and dollar amounts exactly as written (43%, $370K, 50%, 35%, 30%, 60–90%, 65%, 75%, 25%, etc.)
+WRITING STYLE — NON-NEGOTIABLE:
+- Write in the voice of an accomplished senior professional: confident, precise, results-oriented
+- Use strong action verbs (Led, Drove, Architected, Delivered, Secured, Spearheaded, Accelerated, etc.) — no first-person "I"
+- Each rewritten bullet preserves the original achievement's meaning, metrics, and sentiment while naturally weaving in ATS language
+- Keywords are vocabulary to draw from — integrate them into natural sentence flow; never insert them as standalone terms
+- Every sentence must read as if a skilled human writer crafted it — never mechanical, never keyword-stuffed
+- Maintain the implied first-person tone consistent with resume convention throughout
+
+OUTPUT FORMAT — ABSOLUTE RULES:
+- Return ONLY valid JSON — zero markdown, zero code fences, zero explanation text
+- ZERO asterisks (**), ZERO underscores (__), ZERO markdown of any kind inside string values
+- ZERO emoji characters anywhere in output
+- The JSON must use the section's exact original type string as the key
+
+CONTENT RULES:
+- Preserve ALL metrics, percentages, dollar amounts exactly (43%, $370K, 50%, 35%, 30%, 60–90%, 65%, 75%, 25%)
 - Do NOT change company names, job titles, or date ranges
-- Do NOT invent achievements or fabricate numbers not present in the original
-- Do NOT use emoji characters
-- Keep bullet length and count consistent with originals
+- Do NOT invent achievements or fabricate numbers
+- Keep bullet count exactly equal to originals — never add or remove bullets
 
-SKILLS SECTION REQUIREMENTS:
-- Add ALL ATS keywords from the list as new skills if they are not already present
-- Preserve every existing skill — do not remove any
-- Place the most ATS-relevant skills first
+SKILLS SECTION:
+- Add ALL ATS keywords from the provided list as new skill items if not already present
+- Keep every existing skill — do not remove any
+- Place most ATS-relevant skills first
 - Return the complete merged list
 
-OUTPUT FORMAT RULES — CRITICAL:
-- Return ONLY valid JSON — no markdown, no code fences, no explanation text before or after
-- No asterisks (**), no underscores (__), no markdown of any kind inside any string value
-- The JSON must have exactly one key per rewriteable section, named by the section's original type string verbatim
-
-ATS KEYWORDS TO INCORPORATE:
+ATS KEYWORDS TO WEAVE IN:
 ${keywords.join(', ')}
 
 REQUIRED JSON STRUCTURE:
@@ -66,26 +73,26 @@ REQUIRED JSON STRUCTURE:
     if (k.includes('summary') || k.includes('profile') || k.includes('objective')) {
       const d = section.data || {};
       prompt += `  "${section.type}": {\n`;
-      if (d.paragraph) prompt += `    "paragraph": "<rewritten paragraph — natural prose, keywords woven in>",\n`;
-      if (d.bullets?.length) prompt += `    "bullets": [/* exactly ${d.bullets.length} bullets — same count, naturally rewritten */]\n`;
+      if (d.paragraph) prompt += `    "paragraph": "<rewritten — natural prose, ATS vocab woven in, no markdown>",\n`;
+      if (d.bullets?.length) prompt += `    "bullets": [/* exactly ${d.bullets.length} bullets, naturally rewritten */]\n`;
       prompt += `  },\n`;
     } else if (k.includes('experience') || k.includes('work')) {
       const entries = section.data?.entries || [];
       prompt += `  "${section.type}": { "entries": [\n`;
       entries.forEach((entry: any, idx: number) => {
         const count = entry.bullets?.length || 0;
-        prompt += `    { "bullets": [/* EXACTLY ${count} bullet${count !== 1 ? 's' : ''} — ${entry.title} at ${entry.company} — naturally rewritten, no markdown */] }${idx < entries.length - 1 ? ',' : ''}\n`;
+        prompt += `    { "bullets": [/* EXACTLY ${count} bullet${count !== 1 ? 's' : ''} for ${entry.title} at ${entry.company} — no markdown */] }${idx < entries.length - 1 ? ',' : ''}\n`;
       });
       prompt += `  ]},\n`;
     } else if (k.includes('skill')) {
       const count = section.data?.items?.length || 0;
-      prompt += `  "${section.type}": { "items": [/* all ${count} existing skills PLUS any ATS keywords not already present, most relevant first */] },\n`;
+      prompt += `  "${section.type}": { "items": [/* all ${count} existing skills PLUS new ATS keywords not already present, most relevant first */] },\n`;
     }
   });
 
   prompt += `}
 
-ORIGINAL RESUME CONTENT TO REWRITE:
+ORIGINAL CONTENT:
 
 `;
 
@@ -162,16 +169,21 @@ function mergeByIndex(sections: any[], rewritten: any): any[] {
   });
 }
 
-function buildHTML(resume: any): string {
+function buildHTML(resume: any, jobTitle?: string): string {
   const c = resume.contact || {};
   const links: any[] = c.links || [];
+
+  // Build contact line — always render links, use anchor only if URL present
   const contactParts: string[] = [];
   if (c.phone) contactParts.push(`<span>${c.phone}</span>`);
   if (c.email) contactParts.push(`<span><a href="mailto:${c.email}">${c.email}</a></span>`);
   links.forEach((l: any) => {
-    if (l.url) {
-      contactParts.push(`<span><a href="${l.url}" target="_blank">${l.displayText || l.url}</a></span>`);
-    } else if (l.displayText) {
+    if (l.url && l.url.trim()) {
+      // Ensure URL has protocol
+      const href = l.url.startsWith('http') ? l.url : `https://${l.url}`;
+      contactParts.push(`<span><a href="${href}" target="_blank">${l.displayText || l.url}</a></span>`);
+    } else if (l.displayText && l.displayText.trim()) {
+      // No URL captured (PDF limitation) — render as plain text
       contactParts.push(`<span>${l.displayText}</span>`);
     }
   });
@@ -264,34 +276,49 @@ function buildHTML(resume: any): string {
     return '';
   }).join('');
 
+  // Subtitle shows candidate's professional title (from resume), NOT the job listing title
+  const candidateTitle = c.title || '';
+
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${c.name || 'Resume'} — ATS Resume</title>
+<title>${c.name || 'Resume'} — ATS Resume${jobTitle ? ` · ${jobTitle}` : ''}</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
   font-size: 11pt; color: #1a1a1a;
   max-width: 860px; margin: 0 auto; padding: 36px 48px; line-height: 1.5;
+  background: #fff;
 }
 a { color: inherit; text-decoration: none; }
 a:hover { text-decoration: underline; }
-.print-bar {
+/* Print/back bar — fixed top */
+.action-bar {
   position: fixed; top: 0; left: 0; right: 0;
   background: #1a1a1a; color: white;
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 24px; gap: 12px; z-index: 100;
+  padding: 10px 20px; gap: 12px; z-index: 100;
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  flex-wrap: wrap;
 }
-.print-bar span { font-size: 13px; opacity: 0.7; }
-.print-bar button {
-  background: #007aff; color: white; border: none; border-radius: 8px;
-  padding: 7px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+.action-bar-left { display: flex; align-items: center; gap: 10px; }
+.action-bar-right { display: flex; align-items: center; gap: 8px; }
+.action-bar span.label { font-size: 12px; opacity: 0.6; white-space: nowrap; }
+.btn-back {
+  background: rgba(255,255,255,0.12); color: white; border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+  white-space: nowrap;
 }
-.print-bar button:hover { background: #0066dd; }
+.btn-back:hover { background: rgba(255,255,255,0.2); }
+.btn-print {
+  background: #007aff; color: white; border: none;
+  border-radius: 8px; padding: 7px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+  white-space: nowrap;
+}
+.btn-print:hover { background: #0066dd; }
 .resume-body { margin-top: 52px; }
 .header { margin-bottom: 20px; border-bottom: 2px solid #1a1a1a; padding-bottom: 14px; }
 .header-name { font-size: 22pt; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 3px; }
@@ -327,13 +354,14 @@ a:hover { text-decoration: underline; }
 }
 @media screen and (max-width: 600px) {
   body { padding: 20px 16px; font-size: 10pt; }
-  .resume-body { margin-top: 56px; }
+  .resume-body { margin-top: 60px; }
   .header-name { font-size: 16pt; }
   .job-header { flex-direction: column; gap: 2px; }
   .job-right { text-align: left; }
+  .action-bar { padding: 8px 16px; }
 }
 @media print {
-  .print-bar { display: none; }
+  .action-bar { display: none; }
   .resume-body { margin-top: 0; }
   body { padding: 20px 28px; }
   .skill-tag { background: #f5f5f5; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -341,14 +369,19 @@ a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
-<div class="print-bar">
-  <span>Ape X Job Hunt — ATS Resume</span>
-  <button onclick="window.print()">Save as PDF / Print</button>
+<div class="action-bar">
+  <div class="action-bar-left">
+    <button class="btn-back" onclick="history.back()">← Back to Results</button>
+    <span class="label">${jobTitle ? `ATS Resume · ${jobTitle}` : 'ATS Resume'}</span>
+  </div>
+  <div class="action-bar-right">
+    <button class="btn-print" onclick="window.print()">Save as PDF</button>
+  </div>
 </div>
 <div class="resume-body">
 <div class="header">
   <div class="header-name">${c.name || ''}</div>
-  ${c.title ? `<div class="header-title">${c.title}</div>` : ''}
+  ${candidateTitle ? `<div class="header-title">${candidateTitle}</div>` : ''}
   <div class="header-contact">${contactParts.join('')}</div>
 </div>
 ${sectionsHtml}
@@ -359,7 +392,7 @@ ${sectionsHtml}
 
 export async function POST(req: Request) {
   try {
-    const { jobText, snippet, parsedResume } = await req.json();
+    const { jobText, snippet, parsedResume, jobTitle } = await req.json();
     const apiKey = req.headers.get('x-gemini-key');
 
     if (!apiKey) return NextResponse.json({ error: 'Missing API Key' }, { status: 401 });
@@ -373,13 +406,13 @@ export async function POST(req: Request) {
 
     // Step 1 — Extract ATS keywords
     const kwRes = await model.generateContent(
-      `Extract the top 25 most important ATS keywords and phrases from this job description. Include skills, tools, methodologies, role-specific terms, and action verbs. Return ONLY a JSON array of strings — no markdown, no explanation.\n\n${jdText}`
+      `Extract the top 25 most important ATS keywords and phrases from this job description. Include skills, tools, methodologies, role-specific terms, and strong action verbs. Return ONLY a JSON array of strings — no markdown, no explanation.\n\n${jdText}`
     );
     let kwText = kwRes.response.text().trim();
     if (kwText.startsWith('`')) kwText = kwText.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
     const keywords: string[] = JSON.parse(kwText);
 
-    // Step 2 — Build dynamic rewrite prompt
+    // Step 2 — Build rewrite prompt
     const sections = parsedResume.sections || [];
     const rewritePrompt = buildRewritePrompt(sections, keywords);
 
@@ -404,8 +437,8 @@ export async function POST(req: Request) {
     const mergedSections = mergeByIndex(sections, rewritten);
     const mergedResume = { ...parsedResume, sections: mergedSections };
 
-    // Step 5 — Build HTML
-    const html = buildHTML(mergedResume);
+    // Step 5 — Build HTML (pass jobTitle for action bar label only, NOT for header name)
+    const html = buildHTML(mergedResume, jobTitle);
     return NextResponse.json({ html });
 
   } catch (error) {
