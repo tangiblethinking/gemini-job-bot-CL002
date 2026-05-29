@@ -11,6 +11,59 @@ const VERIFIED_DOMAINS = [
   'smartrecruiters.com',
 ];
 
+/**
+ * Clean raw page titles from ATS job boards into a readable role title + company name.
+ *
+ * Raw examples:
+ *   "Job Application for Product Designer / UX/UI Designer at Next Street"  → title: "Product Designer / UX/UI Designer", company: "Next Street"
+ *   "Senior Product Designer - Figma"                                        → title: "Senior Product Designer", company: "Figma"
+ *   "UX Designer | Stripe"                                                   → title: "UX Designer", company: "Stripe"
+ *   "Product Designer (Remote) at Shopify"                                   → title: "Product Designer", company: "Shopify"
+ *   "Director of UX — Airbnb"                                                → title: "Director of UX", company: "Airbnb"
+ */
+function parseJobTitle(raw: string): { title: string; company: string } {
+  let title = raw.trim();
+  let company = '';
+
+  // Pattern 1: "Job Application for [ROLE] at [COMPANY]" — Greenhouse
+  const ghMatch = title.match(/^job application for (.+?) at (.+)$/i);
+  if (ghMatch) {
+    return {
+      title: ghMatch[1].trim(),
+      company: ghMatch[2].trim(),
+    };
+  }
+
+  // Pattern 2: "[ROLE] at [COMPANY]"
+  const atMatch = title.match(/^(.+?)\s+at\s+([A-Z][^|\-–—]+)$/i);
+  if (atMatch) {
+    return {
+      title: atMatch[1].trim(),
+      company: atMatch[2].trim(),
+    };
+  }
+
+  // Pattern 3: "[ROLE] | [COMPANY]" or "[ROLE] - [COMPANY]" or "[ROLE] — [COMPANY]" or "[ROLE] – [COMPANY]"
+  const sepMatch = title.match(/^(.+?)\s*[\|][\s]+(.+)$/) ||
+                   title.match(/^(.+?)\s+[-–—]\s+([A-Z][^\-–—]+)$/);
+  if (sepMatch) {
+    return {
+      title: sepMatch[1].trim(),
+      company: sepMatch[2].trim(),
+    };
+  }
+
+  // No company extractable — return cleaned title as-is
+  // Strip common noise suffixes
+  title = title
+    .replace(/\s*\(remote\)/gi, '')
+    .replace(/\s*\(hybrid\)/gi, '')
+    .replace(/\s*\(on-?site\)/gi, '')
+    .trim();
+
+  return { title, company };
+}
+
 export async function POST(req: Request) {
   try {
     const { titles } = await req.json();
@@ -34,19 +87,27 @@ export async function POST(req: Request) {
             body: JSON.stringify({ q: `${query} site:${domain}`, num: 5 }),
           });
           const data = await res.json();
-          return (data.organic || []).map((result: any) => ({
-            title: result.title,
-            link: result.link,
-            snippet: result.snippet || '',
-            source: (() => {
+          return (data.organic || []).map((result: any) => {
+            const { title, company } = parseJobTitle(result.title || '');
+
+            // Derive domain label as fallback source display
+            const domainLabel = (() => {
               try {
                 const hostname = new URL(result.link).hostname;
                 return hostname.replace('boards.', '').replace('jobs.', '');
               } catch {
                 return domain;
               }
-            })(),
-          }));
+            })();
+
+            return {
+              title,
+              company,           // clean company name extracted from raw title
+              link: result.link,
+              snippet: result.snippet || '',
+              source: domainLabel, // domain — kept for deduplication/display fallback
+            };
+          });
         } catch {
           return [];
         }

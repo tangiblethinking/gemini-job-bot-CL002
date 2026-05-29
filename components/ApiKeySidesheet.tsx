@@ -7,6 +7,7 @@ type KeyStatus = 'idle' | 'saving' | 'valid' | 'invalid';
 export default function ApiKeySidesheet() {
   const { geminiKey, serperKey, setApiKeys } = useApp();
 
+  // Session-only verified flag — resets on every page load and on resetAll
   const [keysVerifiedThisSession, setKeysVerifiedThisSession] = useState(false);
   const [geminiInput, setGeminiInput] = useState('');
   const [serperInput, setSerperInput] = useState('');
@@ -14,10 +15,16 @@ export default function ApiKeySidesheet() {
   const [status, setStatus] = useState<KeyStatus>('idle');
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Auto-populate from saved keys on hydration
+  // Sync input fields whenever context keys change — including when resetAll clears them to ''
   useEffect(() => {
-    if (geminiKey) setGeminiInput(geminiKey);
-    if (serperKey) setSerperInput(serperKey);
+    setGeminiInput(geminiKey);
+    setSerperInput(serperKey);
+    // If keys were cleared (reset), also clear verified state
+    if (!geminiKey && !serperKey) {
+      setKeysVerifiedThisSession(false);
+      setStatus('idle');
+      setErrorMsg('');
+    }
   }, [geminiKey, serperKey]);
 
   const handleSaveAndVerify = async () => {
@@ -113,12 +120,7 @@ export default function ApiKeySidesheet() {
                 placeholder="AIza..."
                 className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 w-full font-mono"
               />
-              <a
-                href="https://aistudio.google.com/app/apikey"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-500 hover:underline"
-              >
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-500 hover:underline">
                 Get Gemini key ↗
               </a>
             </div>
@@ -138,12 +140,7 @@ export default function ApiKeySidesheet() {
                 placeholder="Enter Serper key..."
                 className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 w-full font-mono"
               />
-              <a
-                href="https://serper.dev"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-500 hover:underline"
-              >
+              <a href="https://serper.dev" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-500 hover:underline">
                 Get Serper key ↗
               </a>
             </div>
