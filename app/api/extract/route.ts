@@ -1,85 +1,89 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import * as zlib from 'zlib';
-import { promisify } from 'util';
 
-const inflateRaw = promisify(zlib.inflateRaw);
-const inflate = promisify(zlib.inflate);
+interface ResolvedLink {
+  displayText: string;
+  url: string;
+}
 
 /**
- * Extract all hyperlink URIs from a PDF buffer.
+ * Extract all hyperlinks from a PDF using pdfjs-dist annotation API.
+ * Returns { displayText, url } pairs where displayText is the exact
+ * text the author hyperlinked, matched by coordinate overlap.
  *
- * Strategy: PDFs store hyperlinks as /URI annotations inside object streams.
- * Modern PDFs compress object streams with zlib (FlateDecode). We:
- * 1. Try plain-text regex on raw buffer first (uncompressed PDFs)
- * 2. Find all FlateDecode streams, decompress them, regex on the result
- * 3. Deduplicate and return all found URLs
+ * This handles all PDF variants including object-stream compressed PDFs
+ * (PDF 1.5+) which raw buffer regex cannot reach.
  */
-async function extractUrlsFromPdf(buffer: Buffer): Promise<string[]> {
-  const urls = new Set<string>();
+async function extractLinksFromPdf(buffer: Buffer): Promise<ResolvedLink[]> {
+  // Dynamic import — pdfjs-dist is ESM only
+  const { getDocument, GlobalWorkerOptions } = await import(
+    'pdfjs-dist/legacy/build/pdf.mjs' as any
+  );
 
-  // Helper: extract URIs from a string using both /URI(...) and /URI<...> patterns
-  function extractUris(text: string) {
-    // Standard string form: /URI(https://...)
-    const re1 = /\/URI\s*\(([^)]+)\)/g;
-    let m;
-    while ((m = re1.exec(text)) !== null) {
-      const url = m[1].trim().replace(/\\\//g, '/');
-      if (url.startsWith('http') || url.startsWith('mailto:')) urls.add(url);
-    }
-    // Also catch /URI followed by whitespace then (url)
-    const re2 = /\/URI\s*\n\s*\(([^)]+)\)/g;
-    while ((m = re2.exec(text)) !== null) {
-      const url = m[1].trim().replace(/\\\//g, '/');
-      if (url.startsWith('http') || url.startsWith('mailto:')) urls.add(url);
-    }
-  }
+  // Point to bundled worker — required even in Node
+  GlobalWorkerOptions.workerSrc = new URL(
+    'pdfjs-dist/legacy/build/pdf.worker.mjs',
+    import.meta.url
+  ).href;
 
-  // Pass 1: raw buffer as latin1 (works for uncompressed / partially compressed PDFs)
-  const raw = buffer.toString('latin1');
-  extractUris(raw);
+  const data = new Uint8Array(buffer);
+  const doc = await getDocument({
+    data,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    useSystemFonts: true,
+    disableAutoFetch: true,
+  }).promise;
 
-  // Pass 2: find and decompress all FlateDecode streams
-  // PDF stream format: <<...>> stream\r\n[compressed bytes]\r\nendstream
-  // We find stream boundaries and try to inflate the bytes between them
-  const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
-  let streamMatch;
-  const decompressPromises: Promise<void>[] = [];
+  const results = new Map<string, string>(); // url -> displayText
 
-  while ((streamMatch = streamRegex.exec(raw)) !== null) {
-    const streamContent = streamMatch[1];
-    // Only attempt decompression if this looks like a binary/compressed stream
-    // (contains non-printable chars suggesting compression)
-    const hasBinary = /[\x00-\x08\x0e-\x1f\x80-\xff]/.test(streamContent.substring(0, 100));
-    if (!hasBinary) {
-      // Already plain text — extract URIs directly
-      extractUris(streamContent);
-      continue;
-    }
+  for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
+    const page = await doc.getPage(pageNum);
+    const [annotations, textContent] = await Promise.all([
+      page.getAnnotations(),
+      page.getTextContent(),
+    ]);
 
-    // Convert the matched string back to a Buffer for decompression
-    const streamBuf = Buffer.from(streamContent, 'latin1');
-
-    decompressPromises.push(
-      (async () => {
-        // Try inflate (zlib header) first, then inflateRaw (no header)
-        for (const decompress of [inflate, inflateRaw]) {
-          try {
-            const decompressed = await decompress(streamBuf);
-            extractUris(decompressed.toString('latin1'));
-            break;
-          } catch {
-            // Not decompressible with this method — try next
-          }
-        }
-      })()
+    const links = (annotations as any[]).filter(
+      (a: any) => a.subtype === 'Link' && a.url
     );
+    if (!links.length) continue;
+
+    for (const link of links) {
+      if (results.has(link.url)) continue; // deduplicate
+      const [x1, y1, x2, y2] = link.rect as number[];
+
+      // Match text items whose baseline falls within the annotation rect
+      const matched: string[] = [];
+      for (const item of (textContent as any).items) {
+        if (!item.str?.trim()) continue;
+        const tx: number = item.transform[4];
+        const ty: number = item.transform[5];
+        // Small tolerance (2pt) for floating point variation
+        if (tx >= x1 - 2 && tx <= x2 + 2 && ty >= y1 - 2 && ty <= y2 + 2) {
+          matched.push(item.str.trim());
+        }
+      }
+
+      const displayText = matched.join(' ').trim();
+      if (displayText) {
+        results.set(link.url, displayText);
+      } else {
+        // Fallback: no text matched — use domain as display
+        try {
+          const host = new URL(link.url).hostname.replace('www.', '');
+          results.set(link.url, host);
+        } catch {
+          results.set(link.url, link.url);
+        }
+      }
+    }
   }
 
-  // Run all decompressions in parallel
-  await Promise.allSettled(decompressPromises);
-
-  return [...urls];
+  // Return as array, filtering out mailto (handled by contact.email already)
+  return [...results.entries()]
+    .filter(([url]) => !url.startsWith('mailto:'))
+    .map(([url, displayText]) => ({ displayText, url }));
 }
 
 export async function POST(req: Request) {
@@ -93,9 +97,15 @@ export async function POST(req: Request) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // ── Step 1: Extract raw URLs from PDF streams (compressed + uncompressed) ─
-    const rawUrls = await extractUrlsFromPdf(buffer);
-    console.log('Extracted URLs from PDF:', rawUrls);
+    // ── Step 1: Extract hyperlinks with exact anchor text via pdfjs ───────────
+    let resolvedLinks: ResolvedLink[] = [];
+    try {
+      resolvedLinks = await extractLinksFromPdf(buffer);
+      console.log('Extracted URLs from PDF:', resolvedLinks);
+    } catch (err) {
+      // Non-fatal — continue without links if pdfjs fails
+      console.warn('pdfjs link extraction failed:', err);
+    }
 
     // ── Step 2: Parse text from PDF ───────────────────────────────────────────
     const pdfParse = (await import('pdf-parse')).default;
@@ -109,33 +119,9 @@ export async function POST(req: Request) {
       );
     }
 
+    // ── Step 3: Gemini parse — resume structure only, no URL mapping needed ───
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-
-    // ── Step 3: Single Gemini call — parse resume AND map URLs ────────────────
-    const urlMappingSection = rawUrls.length > 0 ? `
-
-HYPERLINK MAPPING (CRITICAL):
-The following URLs were extracted from the PDF's hyperlink annotations. For each URL,
-identify the EXACT word or phrase it was embedded in within the resume — the display
-text the author hyperlinked. Use the resume content as context.
-
-Extracted URLs:
-${rawUrls.map((u, i) => `${i + 1}. ${u}`).join('\n')}
-
-Return these as "resolvedLinks" at the top level:
-"resolvedLinks": [
-  { "displayText": "exact anchor text from resume", "url": "the full URL" }
-]
-
-Rules:
-- displayText = EXACT text from resume (e.g. "LinkedIn", "Portfolio", "Plexus Worldwide")
-- For known platforms (linkedin.com, github.com, dribbble.com, behance.net, twitter.com,
-  medium.com, notion.so) use the platform name if no explicit anchor text found
-- Include ALL URLs — none omitted
-- Unknown domains: use the company or person name the URL most likely belongs to
-` : `
-"resolvedLinks": [],`;
 
     const prompt = `You are a resume parser. Read this resume text and return a single JSON object capturing EVERYTHING exactly as written.
 
@@ -146,20 +132,17 @@ CRITICAL RULES:
 - Preserve all dates, company names, job titles exactly
 - Capture sections in the ORDER they appear in the resume
 - Every bullet point must be its own string in an array — never merge or split bullets
-- For the contact object: look for any mention of LinkedIn, Portfolio, GitHub, website, or similar. Capture the display text and any URL visible in the text. If a URL is not visible but a platform name is (e.g. "LinkedIn"), set the url to "" and displayText to "LinkedIn"
+- For the contact object: look for any mention of LinkedIn, Portfolio, GitHub, website, or similar. Capture the display text. Set url to "" — URLs are provided separately.
 - Do NOT use emoji characters anywhere — replace ⭐ or similar with "STAR:"
-- For experience entries: if a company has an associated URL from resolvedLinks, add "companyUrl" to that entry
-${urlMappingSection}
 
 Return this JSON structure:
 
 {
-  "resolvedLinks": [...],
   "contact": {
     "name": "full name",
-    "title": "professional title",
-    "email": "email",
-    "phone": "phone",
+    "title": "professional title if shown at top",
+    "email": "email address",
+    "phone": "phone number",
     "location": "location",
     "links": [
       { "displayText": "LinkedIn", "url": "" },
@@ -168,17 +151,17 @@ Return this JSON structure:
   },
   "sections": [
     {
-      "type": "exact section heading",
+      "type": "exact section heading from resume",
       "data": {}
     }
   ]
 }
 
 Section data format:
-- Summary/Profile/Objective: { "paragraph": "...", "bullets": ["..."] }
-- Experience/Work History: { "entries": [ { "title": "...", "company": "...", "companyUrl": "", "dates": "...", "location": "...", "bullets": ["..."] } ] }
+- Summary/Profile/Objective: { "paragraph": "...", "bullets": ["...", "..."] }
+- Experience/Work History: { "entries": [ { "title": "...", "company": "...", "companyUrl": "", "dates": "...", "location": "...", "bullets": ["...", "..."] } ] }
 - Skills: { "items": ["skill1", "skill2"] }
-- Education/Certifications: { "items": ["line1"] }
+- Education/Certifications: { "items": ["line1", "line2"] }
 - Achievements/Accomplishments: { "items": ["achievement text"] }
 - Any other section: { "items": ["line1"] }
 
@@ -207,58 +190,44 @@ ${rawText}`;
       parsedResume = JSON.parse(retryText);
     }
 
-    // ── Step 4: Merge resolvedLinks → contact.links + experience companyUrls ──
-    const resolvedLinks: { displayText: string; url: string }[] =
-      parsedResume.resolvedLinks || [];
+    // ── Step 4: Merge resolvedLinks into contact.links + experience entries ───
+    // Build lookup: displayText (lowercase) → url
+    const linkByText = new Map<string, string>();
+    resolvedLinks.forEach(rl => linkByText.set(rl.displayText.toLowerCase().trim(), rl.url));
 
+    // Backfill contact.links with resolved URLs matched by displayText
+    const contactLinks = (parsedResume.contact?.links || []).map((cl: any) => {
+      const url = linkByText.get(cl.displayText.toLowerCase().trim()) || cl.url || '';
+      return { ...cl, url };
+    });
+
+    // Add any resolvedLinks not already in contactLinks
     const CONTACT_DOMAINS = [
       'linkedin', 'github', 'dribbble', 'behance', 'twitter', 'x.com',
-      'instagram', 'portfolio', 'myportfolio', 'medium', 'notion',
-      'behance', 'figma', 'read.cv',
+      'instagram', 'myportfolio', 'uxapex', 'medium', 'notion', 'read.cv',
     ];
-
-    // Map displayText (lowercase) → url for fast lookup
-    const resolvedMap = new Map<string, string>();
     resolvedLinks.forEach(rl => {
-      if (rl.url) resolvedMap.set(rl.displayText.toLowerCase().trim(), rl.url);
-    });
-
-    // Backfill contact.links with resolved URLs
-    const contactLinks = (parsedResume.contact?.links || []).map((cl: any) => {
-      const resolved = resolvedMap.get(cl.displayText.toLowerCase().trim());
-      return { ...cl, url: resolved || cl.url || '' };
-    });
-
-    // Add any resolvedLinks not in contactLinks that are contact/social type
-    resolvedLinks.forEach(rl => {
-      const alreadyIn = contactLinks.some(
+      const already = contactLinks.some(
         (cl: any) => cl.displayText.toLowerCase() === rl.displayText.toLowerCase()
       );
-      if (!alreadyIn && rl.url) {
-        const isContactType = CONTACT_DOMAINS.some(d =>
-          rl.url.toLowerCase().includes(d) ||
-          rl.displayText.toLowerCase().includes(d)
+      if (!already) {
+        const isContact = CONTACT_DOMAINS.some(d =>
+          rl.url.toLowerCase().includes(d) || rl.displayText.toLowerCase().includes(d)
         );
-        if (isContactType) contactLinks.push({ displayText: rl.displayText, url: rl.url });
+        if (isContact) contactLinks.push({ displayText: rl.displayText, url: rl.url });
       }
     });
 
-    // Update experience entries with companyUrls
+    // Backfill experience entry companyUrls matched by company name
     const sections = (parsedResume.sections || []).map((section: any) => {
       const k = (section.type || '').toLowerCase();
       if (!k.includes('experience') && !k.includes('work')) return section;
 
       const entries = (section.data?.entries || []).map((entry: any) => {
-        if (entry.companyUrl) return entry;
+        // Match by displayText === company name (exact, set by pdfjs extraction)
         const companyLower = (entry.company || '').toLowerCase().trim();
-        const match = resolvedLinks.find(rl => {
-          if (!rl.url) return false;
-          const dl = rl.displayText.toLowerCase().trim();
-          return dl === companyLower ||
-            companyLower.includes(dl) ||
-            dl.includes(companyLower);
-        });
-        return match ? { ...entry, companyUrl: match.url } : { ...entry, companyUrl: '' };
+        const url = linkByText.get(companyLower) || '';
+        return { ...entry, companyUrl: url };
       });
 
       return { ...section, data: { ...section.data, entries } };
@@ -266,6 +235,7 @@ ${rawText}`;
 
     const finalResume = {
       ...parsedResume,
+      resolvedLinks,
       contact: { ...parsedResume.contact, links: contactLinks },
       sections,
     };
