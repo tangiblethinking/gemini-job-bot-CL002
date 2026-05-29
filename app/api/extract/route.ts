@@ -25,57 +25,55 @@ export async function POST(req: Request) {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-    const prompt = `You are a resume parser. Read this resume text and return a single JSON object that captures EVERYTHING in the resume exactly as written.
+    const prompt = `You are a resume parser. Read this resume text and return a single JSON object capturing EVERYTHING exactly as written.
 
-RULES:
-- Do not invent, summarize, or omit anything
+CRITICAL RULES:
+- Do NOT invent, summarize, or omit anything
 - Preserve every bullet point word for word
 - Preserve all metrics, percentages, dollar amounts exactly
 - Preserve all dates, company names, job titles exactly
 - Capture sections in the ORDER they appear in the resume
-- If a section type is unclear, name it descriptively (e.g. "volunteer", "publications", "awards")
-- Every bullet point in every job must be captured individually in an array
-- Do not merge bullets or split bullets
+- Every bullet point must be its own string in an array — never merge or split bullets
+- For the contact object: look for any mention of LinkedIn, Portfolio, GitHub, website, or similar. Capture the display text and any URL visible in the text. If a URL is not visible but a platform name is (e.g. "LinkedIn"), set the url to "" and displayText to "LinkedIn"
+- Do NOT use emoji characters anywhere in your output — replace any ⭐ or similar with plain text marker "STAR:"
 
-Return this exact JSON structure — adapting the sections array to whatever actually exists in the resume:
+Return this JSON structure — adapt sections array to whatever actually exists:
 
 {
   "contact": {
     "name": "full name",
-    "title": "professional title if present on resume",
-    "email": "email",
-    "phone": "phone",
+    "title": "professional title if shown at top of resume",
+    "email": "email address",
+    "phone": "phone number",
     "location": "location",
-    "linkedin": "linkedin url if present",
-    "portfolio": "portfolio url if present",
-    "other": "any other contact links"
+    "links": [
+      { "displayText": "LinkedIn", "url": "https://linkedin.com/in/..." },
+      { "displayText": "Portfolio", "url": "https://..." }
+    ]
   },
   "sections": [
     {
-      "type": "the section name exactly as it appears or a clear descriptive label",
-      "data": <section content — see format rules below>
+      "type": "exact section heading from resume or a clear label",
+      "data": <see format rules below>
     }
   ]
 }
 
 Section data format rules:
-- For a summary/profile/objective section: { "paragraph": "...", "bullets": ["...", "..."] } — omit bullets if none exist
-- For an experience/work history section: { "entries": [ { "title": "...", "company": "...", "dates": "...", "location": "...", "bullets": ["...", "...", "..."] } ] }
-- For a skills section: { "items": ["skill1", "skill2", ...] }
-- For an education section: { "items": ["degree line 1", "degree line 2", ...] }
-- For an achievements/accomplishments section: { "items": ["achievement 1", "achievement 2", ...] }
-- For certifications: { "items": ["cert 1", "cert 2", ...] }
-- For any other section type: { "items": ["line 1", "line 2", ...] }
+- Summary/Profile/Objective: { "paragraph": "...", "bullets": ["...", "..."] } — omit bullets key if none
+- Experience/Work History: { "entries": [ { "title": "...", "company": "...", "dates": "...", "location": "...", "bullets": ["...", "..."] } ] }
+- Skills: { "items": ["skill1", "skill2"] }
+- Education/Certifications: { "items": ["line1", "line2"] }
+- Achievements/Accomplishments: { "items": ["achievement text without emoji prefix", "..."] }
+- Any other section: { "items": ["line1", "line2"] }
 
-Return only valid JSON. No markdown. No explanation. No code fences.
+Return only valid JSON. No markdown fences. No explanation.
 
 Resume text:
 ${rawText}`;
 
     const result = await model.generateContent(prompt);
     let responseText = result.response.text().trim();
-
-    // Strip markdown code fences if model adds them
     if (responseText.startsWith('```')) {
       responseText = responseText.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
     }
@@ -84,9 +82,8 @@ ${rawText}`;
     try {
       parsedResume = JSON.parse(responseText);
     } catch {
-      // Retry once with a stricter prompt if JSON is malformed
       const retryResult = await model.generateContent(
-        `The following is a partial or malformed JSON resume parse. Fix it and return only valid JSON, no markdown, no explanation:\n\n${responseText.substring(0, 8000)}`
+        `Fix this malformed JSON and return only valid JSON, no markdown:\n\n${responseText.substring(0, 8000)}`
       );
       let retryText = retryResult.response.text().trim();
       if (retryText.startsWith('```')) {
@@ -95,7 +92,7 @@ ${rawText}`;
       parsedResume = JSON.parse(retryText);
     }
 
-    // Extract top job titles for search chips (from first experience section)
+    // Extract job titles from first experience section for search chips
     const expSection = parsedResume.sections?.find((s: any) =>
       s.type?.toLowerCase().includes('experience') || s.type?.toLowerCase().includes('work')
     );
@@ -104,12 +101,17 @@ ${rawText}`;
       .map((e: any) => e.title)
       .filter(Boolean) || [];
 
-    return NextResponse.json({
-      parsedResume,
-      titles,
-      rawText,
-      contact: parsedResume.contact || {},
-    });
+    // Build flat contact for backwards compatibility
+    const contact = {
+      name: parsedResume.contact?.name || '',
+      email: parsedResume.contact?.email || '',
+      phone: parsedResume.contact?.phone || '',
+      location: parsedResume.contact?.location || '',
+      title: parsedResume.contact?.title || '',
+      links: parsedResume.contact?.links || [],
+    };
+
+    return NextResponse.json({ parsedResume, titles, rawText, contact });
 
   } catch (error) {
     console.error('Extract error:', error);
