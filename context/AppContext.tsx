@@ -22,6 +22,7 @@ interface AppContextType {
   readyToApplyJobs: Set<string>;
   atsProcessing: Record<string, boolean>;
   contact: Contact;
+  jobs: any[];
   setApiKeys: (gemini: string, serper: string) => void;
   setRawResumeText: (text: string) => void;
   setParsedResume: (resume: any) => void;
@@ -30,6 +31,7 @@ interface AppContextType {
   markJobReady: (jobUrl: string) => void;
   setAtsProcessing: (jobUrl: string, val: boolean) => void;
   setContact: (contact: Contact) => void;
+  setJobs: (jobs: any[]) => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -44,25 +46,45 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const [readyToApplyJobs, setReadyToApplyJobs] = useState<Set<string>>(new Set());
   const [atsProcessing, setProcessing] = useState<Record<string, boolean>>({});
   const [contact, setContactState] = useState<Contact>({ name: '' });
+  const [jobs, setJobsState] = useState<any[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
-  // Rehydrate everything from localStorage on mount
+  // Rehydrate from localStorage on mount
   useEffect(() => {
-    setGeminiKey(localStorage.getItem('gemini_api_key') || '');
-    setSerperKey(localStorage.getItem('serper_api_key') || '');
+    // Keys — restore to state but NOT treated as verified this session
+    const storedGemini = localStorage.getItem('gemini_api_key') || '';
+    const storedSerper = localStorage.getItem('serper_api_key') || '';
+    setGeminiKey(storedGemini);
+    setSerperKey(storedSerper);
 
     const storedResume = localStorage.getItem('parsed_resume');
     const storedTitles = localStorage.getItem('search_titles');
     const storedContact = localStorage.getItem('resume_contact');
     const storedRawText = localStorage.getItem('raw_resume_text');
+    const storedJobs = localStorage.getItem('jobs_results');
+    const storedReady = localStorage.getItem('ready_to_apply_jobs');
 
     if (storedResume) {
       try {
         const pr = JSON.parse(storedResume);
         setParsedResumeState(pr);
-        setAppState('PARSED');
+        // Restore to RESULTS if jobs exist, otherwise PARSED
+        if (storedJobs) {
+          try {
+            const parsedJobs = JSON.parse(storedJobs);
+            if (Array.isArray(parsedJobs) && parsedJobs.length > 0) {
+              setJobsState(parsedJobs);
+              setAppState('RESULTS');
+            } else {
+              setAppState('PARSED');
+            }
+          } catch { setAppState('PARSED'); }
+        } else {
+          setAppState('PARSED');
+        }
       } catch { /* ignore corrupt data */ }
     }
+
     if (storedTitles) {
       try { setSearchTitlesState(JSON.parse(storedTitles)); } catch { /* ignore */ }
     }
@@ -71,6 +93,12 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     }
     if (storedRawText) {
       setRawResumeTextState(storedRawText);
+    }
+    if (storedReady) {
+      try {
+        const arr = JSON.parse(storedReady);
+        if (Array.isArray(arr)) setReadyToApplyJobs(new Set(arr));
+      } catch { /* ignore */ }
     }
 
     setHydrated(true);
@@ -108,10 +136,16 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     setContactState(c);
   };
 
+  const setJobs = (j: any[]) => {
+    try { localStorage.setItem('jobs_results', JSON.stringify(j)); } catch { /* ignore */ }
+    setJobsState(j);
+  };
+
   const markJobReady = (jobUrl: string) => {
     setReadyToApplyJobs(prev => {
       const next = new Set(prev);
       next.add(jobUrl);
+      try { localStorage.setItem('ready_to_apply_jobs', JSON.stringify([...next])); } catch { /* ignore */ }
       return next;
     });
   };
@@ -120,15 +154,14 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     setProcessing(prev => ({ ...prev, [jobUrl]: val }));
   };
 
-  // Don't render children until localStorage is hydrated — prevents flash of IDLE state
   if (!hydrated) return null;
 
   return (
     <AppContext.Provider value={{
       geminiKey, serperKey, rawResumeText, parsedResume,
-      searchTitles, appState, readyToApplyJobs, atsProcessing, contact,
+      searchTitles, appState, readyToApplyJobs, atsProcessing, contact, jobs,
       setApiKeys, setRawResumeText, setParsedResume, setSearchTitles,
-      setAppState, markJobReady, setAtsProcessing, setContact,
+      setAppState, markJobReady, setAtsProcessing, setContact, setJobs,
     }}>
       {children}
     </AppContext.Provider>

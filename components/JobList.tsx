@@ -9,6 +9,30 @@ interface Job {
   source: string;
 }
 
+const RESUME_PAGE_HTML = (jobTitle: string, resumeHtml: string) => {
+  // Inject the resume HTML directly — replace the body content with the resume
+  // but keep our wrapper with print bar and back button
+  const bodyMatch = resumeHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+  const bodyContent = bodyMatch ? bodyMatch[1] : resumeHtml;
+  const styleMatch = resumeHtml.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  const resumeStyles = styleMatch ? styleMatch[1] : '';
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATS Resume — ${jobTitle}</title>
+<style>
+${resumeStyles}
+</style>
+</head>
+<body>
+${bodyContent}
+</body>
+</html>`;
+};
+
 const LOADING_HTML = (jobTitle: string) => `<!DOCTYPE html>
 <html>
 <head>
@@ -16,19 +40,19 @@ const LOADING_HTML = (jobTitle: string) => `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Generating Resume — Ape X Job Hunt</title>
 <style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:20px;padding:24px;text-align:center}
-  img{width:120px;opacity:.85}
-  .title{font-size:15px;color:#555;letter-spacing:.01em}
-  .job{font-size:13px;color:#888;max-width:320px;line-height:1.4}
-  .dots::after{content:'';animation:dots 1.4s steps(4,end) infinite}
-  @keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:20px;padding:24px;text-align:center}
+img{width:120px;opacity:.85}
+.title{font-size:15px;color:#555;letter-spacing:.01em}
+.job{font-size:13px;color:#888;max-width:320px;line-height:1.4}
+.dots::after{content:'';animation:dots 1.4s steps(4,end) infinite}
+@keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
 </style>
 </head>
 <body>
-  <img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X" />
-  <p class="title">Generating your ATS resume<span class="dots"></span></p>
-  <p class="job">${jobTitle}</p>
+<img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X" />
+<p class="title">Generating your ATS resume<span class="dots"></span></p>
+<p class="job">${jobTitle}</p>
 </body>
 </html>`;
 
@@ -39,17 +63,19 @@ const ERROR_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Error — Ape X Job Hunt</title>
 <style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px;background:#f5f5f7;padding:24px;text-align:center}
-  img{width:100px;opacity:.5}
-  p{font-size:14px;color:#c00}
-  small{font-size:12px;color:#999}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px;background:#f5f5f7;padding:24px;text-align:center}
+img{width:100px;opacity:.5}
+p{font-size:14px;color:#c00}
+small{font-size:12px;color:#999}
+.back-btn{margin-top:8px;background:#1a1a1a;color:white;border:none;border-radius:10px;padding:10px 24px;font-size:14px;cursor:pointer}
 </style>
 </head>
 <body>
-  <img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X" />
-  <p>Resume generation failed.</p>
-  <small>Close this tab and try again.</small>
+<img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X" />
+<p>Resume generation failed.</p>
+<small>Please go back and try again.</small>
+<button class="back-btn" onclick="window.history.back()">← Go Back</button>
 </body>
 </html>`;
 
@@ -75,12 +101,8 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
   } = useApp();
 
   const generatedHtmlRef = useRef<Map<string, string>>(new Map());
-  // For mobile: store pending result keyed by job link
-  const pendingMobileRef = useRef<Map<string, string>>(new Map());
 
-  // Core fetch — JD extract then ATS rewrite
   async function runATS(job: Job): Promise<string> {
-    // Step 1: fetch JD text (fast, no AI)
     const jdRes = await fetch('/api/jd-extract', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -89,7 +111,6 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
     const jdData = await jdRes.json();
     const jobText = jdData.text || job.snippet;
 
-    // Step 2: ATS rewrite with pre-parsed resume + JD text
     const atsRes = await fetch('/api/ats', {
       method: 'POST',
       headers: {
@@ -103,7 +124,7 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
     return atsData.html;
   }
 
-  // DESKTOP: open blank tab immediately, write loading, write result when ready
+  // DESKTOP: open blank tab, write loading screen, replace with result
   function handleDesktop(job: Job) {
     const tab = window.open('', '_blank');
     if (!tab) return;
@@ -120,35 +141,31 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
       .finally(() => setAtsProcessing(job.link, false));
   }
 
-  // MOBILE: show inline loading indicator, generate, then open blob URL via anchor click
+  // MOBILE: navigate current tab to loading screen, then replace with resume
+  // State is persisted to localStorage so back navigation restores RESULTS
   function handleMobile(job: Job) {
     setAtsProcessing(job.link, true);
 
-    // Store a flag so the UI shows "generating" state
-    pendingMobileRef.current.set(job.link, 'pending');
+    // Show loading screen in current tab immediately
+    document.open();
+    document.write(LOADING_HTML(job.title));
+    document.close();
 
     runATS(job)
       .then(html => {
-        pendingMobileRef.current.delete(job.link);
+        // Replace current tab content with resume — has print bar built in
+        document.open();
+        document.write(html);
+        document.close();
+        // Store in sessionStorage so reopen works if user navigates back
+        try { sessionStorage.setItem(`resume_${job.link}`, html); } catch { /* ignore */ }
         generatedHtmlRef.current.set(job.link, html);
         markJobReady(job.link);
-
-        // Use blob URL + programmatic anchor click — works on mobile Safari
-        const blob = new Blob([html], { type: 'text/html' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        // Revoke after delay to allow tab to load
-        setTimeout(() => URL.revokeObjectURL(url), 30000);
       })
       .catch(() => {
-        pendingMobileRef.current.delete(job.link);
-        alert('Resume generation failed. Please try again.');
+        document.open();
+        document.write(ERROR_HTML);
+        document.close();
       })
       .finally(() => setAtsProcessing(job.link, false));
   }
@@ -165,16 +182,9 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
     const html = generatedHtmlRef.current.get(job.link);
     if (!html) return;
     if (isMobile()) {
-      const blob = new Blob([html], { type: 'text/html' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      document.open();
+      document.write(html);
+      document.close();
     } else {
       const tab = window.open('', '_blank');
       if (tab) writeToTab(tab, html);

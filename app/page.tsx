@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from 'react';
+import React from 'react';
 import { useApp } from '@/context/AppContext';
 import TopNav from '@/components/TopNav';
 import ApiKeySidesheet from '@/components/ApiKeySidesheet';
@@ -14,12 +14,12 @@ export default function Page() {
     setRawResumeText, setParsedResume,
     setSearchTitles, setContact,
     geminiKey, serperKey, searchTitles,
+    jobs, setJobs,
   } = useApp();
 
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [searchError, setSearchError] = useState('');
-  const [uploadError, setUploadError] = useState('');
-  const [uploading, setUploading] = useState(false);
+  const [searchError, setSearchError] = React.useState('');
+  const [uploadError, setUploadError] = React.useState('');
+  const [uploading, setUploading] = React.useState(false);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -49,7 +49,6 @@ export default function Page() {
         return;
       }
 
-      // Store everything in context
       setRawResumeText(data.rawText || '');
       setParsedResume(data.parsedResume || null);
       setSearchTitles(data.titles || []);
@@ -81,7 +80,8 @@ export default function Page() {
         body: JSON.stringify({ titles: searchTitles }),
       });
       const data = await res.json();
-      setJobs(Array.isArray(data) ? data : []);
+      const results = Array.isArray(data) ? data : [];
+      setJobs(results);
       setAppState('RESULTS');
     } catch (err) {
       console.error('Search failed:', err);
