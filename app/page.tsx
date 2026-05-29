@@ -11,10 +11,11 @@ import Image from 'next/image';
 export default function Page() {
   const {
     appState, setAppState,
-    setRawResumeText, setSearchTitles,
-    setContact, setEducation,
+    setRawResumeText, setParsedResume,
+    setSearchTitles, setContact,
     geminiKey, serperKey, searchTitles,
   } = useApp();
+
   const [jobs, setJobs] = useState<any[]>([]);
   const [searchError, setSearchError] = useState('');
   const [uploadError, setUploadError] = useState('');
@@ -25,28 +26,36 @@ export default function Page() {
     if (!file) return;
     setUploadError('');
     setUploading(true);
+
     const formData = new FormData();
     formData.append('file', file);
+
     try {
       const res = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'x-gemini-key': geminiKey },
         body: formData,
       });
+
       if (res.status === 422) {
         setUploadError('This PDF looks like a scanned image. Please upload a text-based PDF.');
         return;
       }
+
       const data = await res.json();
+
       if (data.error) {
         setUploadError('Resume extraction failed. Please try again.');
         return;
       }
+
+      // Store everything in context
       setRawResumeText(data.rawText || '');
+      setParsedResume(data.parsedResume || null);
       setSearchTitles(data.titles || []);
-      setContact(data.contact || { name: '', email: '' });
-      setEducation(data.education || []);
+      setContact(data.contact || { name: '' });
       setAppState('PARSED');
+
     } catch (err) {
       console.error('Extract failed:', err);
       setUploadError('Resume extraction failed. Please try again.');
@@ -89,7 +98,6 @@ export default function Page() {
       <ApiKeySidesheet />
       <main className="max-w-3xl mx-auto px-6 py-12">
 
-        {/* IDLE — no keys or no resume yet */}
         {appState === 'IDLE' && (
           <div className="text-center py-16">
             <div className="flex justify-center mb-6">
@@ -122,7 +130,7 @@ export default function Page() {
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed pointer-events-none'
               }`}
             >
-              {uploading ? 'Extracting resume...' : '↑ Upload Resume (PDF)'}
+              {uploading ? 'Parsing resume...' : '↑ Upload Resume (PDF)'}
               <input
                 type="file"
                 accept=".pdf"
@@ -131,10 +139,15 @@ export default function Page() {
                 disabled={!hasKeys || uploading}
               />
             </label>
+
+            {uploading && (
+              <p className="text-gray-400 text-xs mt-4">
+                Reading and structuring your resume — this takes about 15 seconds
+              </p>
+            )}
           </div>
         )}
 
-        {/* PARSED / SEARCHING / RESULTS */}
         {(appState === 'PARSED' || appState === 'SEARCHING' || appState === 'RESULTS') && (
           <>
             <JobTitleChips onSearch={handleSearch} />

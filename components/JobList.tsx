@@ -26,9 +26,8 @@ const LOADING_HTML = `<!DOCTYPE html>
     flex-direction: column;
     gap: 24px;
   }
-  img { width: 120px; opacity: 0.85; }
+  img { width: 140px; opacity: 0.85; }
   .msg { font-size: 15px; color: #555; letter-spacing: 0.01em; }
-  .dots { display: inline-block; }
   .dots::after {
     content: '';
     animation: dots 1.4s steps(4, end) infinite;
@@ -48,36 +47,48 @@ const LOADING_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+const ERROR_HTML = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Error — Ape X Job Hunt</title>
+<style>
+  body { font-family: -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; flex-direction: column; gap: 16px; background: #f5f5f7; }
+  img { width: 100px; opacity: 0.5; }
+  p { font-size: 14px; color: #c00; }
+  small { font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+  <img src="https://cdn.myportfolio.com/abc1e0ab-7370-4502-8c78-92428397bf66/15a26956-0efa-4a8d-be26-27a030f18db9.png?h=6a5aea5f291cc6ed6573f41e6a765bf2" alt="Ape X Job Hunt" />
+  <p>Resume generation failed.</p>
+  <small>Close this tab and try again.</small>
+</body>
+</html>`;
+
 export default function JobList({ jobs }: { jobs: Job[] }) {
   const {
-    geminiKey, rawResumeText, atsProcessing,
-    setAtsProcessing, markJobReady, readyToApplyJobs,
-    contact, education,
+    geminiKey,
+    parsedResume,
+    atsProcessing,
+    setAtsProcessing,
+    markJobReady,
+    readyToApplyJobs,
   } = useApp();
 
-  // Store generated HTML per job link so Resume Done can re-open it
   const generatedHtmlRef = useRef<Map<string, string>>(new Map());
 
-  const openResumeTab = (html: string): Window | null => {
-    const tab = window.open('', '_blank');
-    if (tab) {
-      tab.document.open();
-      tab.document.write(html);
-      tab.document.close();
-    }
-    return tab;
+  const writeToTab = (tab: Window, html: string) => {
+    tab.document.open();
+    tab.document.write(html);
+    tab.document.close();
   };
 
   const handleATS = (job: Job) => {
-    // Open tab immediately inside user gesture — bypasses popup blocker
+    // Open tab synchronously inside user gesture — no popup blocker
     const tab = window.open('', '_blank');
     if (!tab) return;
 
-    // Write loading screen synchronously before any await
-    tab.document.open();
-    tab.document.write(LOADING_HTML);
-    tab.document.close();
-
+    // Immediately show loading screen
+    writeToTab(tab, LOADING_HTML);
     setAtsProcessing(job.link, true);
 
     fetch('/api/ats', {
@@ -88,51 +99,36 @@ export default function JobList({ jobs }: { jobs: Job[] }) {
       },
       body: JSON.stringify({
         jobUrl: job.link,
-        resumeText: rawResumeText,
         snippet: job.snippet,
-        contact,
-        education,
+        parsedResume,
       }),
     })
       .then(res => res.json())
       .then(data => {
         if (data.html) {
-          // Write final resume into the already-open tab
-          tab.document.open();
-          tab.document.write(data.html);
-          tab.document.close();
-          // Store so Resume Done can re-open
+          writeToTab(tab, data.html);
           generatedHtmlRef.current.set(job.link, data.html);
           markJobReady(job.link);
         } else {
-          tab.document.open();
-          tab.document.write('<p style="font-family:sans-serif;padding:40px;color:#c00">Resume generation failed. Please try again.</p>');
-          tab.document.close();
+          writeToTab(tab, ERROR_HTML);
         }
       })
-      .catch(err => {
-        console.error('ATS failed:', err);
-        tab.document.open();
-        tab.document.write('<p style="font-family:sans-serif;padding:40px;color:#c00">Resume generation failed. Please try again.</p>');
-        tab.document.close();
-      })
-      .finally(() => {
-        setAtsProcessing(job.link, false);
-      });
+      .catch(() => writeToTab(tab, ERROR_HTML))
+      .finally(() => setAtsProcessing(job.link, false));
   };
 
   const handleReopenResume = (job: Job) => {
     const html = generatedHtmlRef.current.get(job.link);
-    if (html) {
-      openResumeTab(html);
-    }
+    if (!html) return;
+    const tab = window.open('', '_blank');
+    if (tab) writeToTab(tab, html);
   };
 
   if (!jobs.length) {
     return (
-      <div className="text-center py-16 text-gray-400">
+      <div className="text-center py-16">
         <p className="text-lg font-medium text-gray-600 mb-2">No matching jobs found</p>
-        <p className="text-sm">Try adjusting your job titles and searching again.</p>
+        <p className="text-sm text-gray-400">Try adjusting your job titles and searching again.</p>
       </div>
     );
   }
