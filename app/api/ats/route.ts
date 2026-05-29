@@ -168,9 +168,44 @@ function mergeByIndex(sections: any[], rewritten: any): any[] {
   });
 }
 
+/**
+ * Replace display text with anchor tags wherever a resolved link matches.
+ * Runs on any string — bullet text, paragraphs, etc.
+ * Only replaces the FIRST occurrence to avoid double-wrapping.
+ * Safe: skips if displayText or url is empty.
+ */
+function linkifyText(text: string, resolvedLinks: { displayText: string; url: string }[]): string {
+  let result = text;
+  for (const link of resolvedLinks) {
+    if (!link.displayText || !link.url) continue;
+    // Escape special regex chars in the display text
+    const escaped = link.displayText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const href = link.url.startsWith('http') ? link.url : `https://${link.url}`;
+    result = result.replace(
+      new RegExp(`(?<!<a[^>]*>)(${escaped})(?![^<]*<\/a>)`, 'i'),
+      `<a href="${href}" target="_blank" style="color:inherit;text-decoration:underline">$1</a>`
+    );
+  }
+  return result;
+}
+
 function buildHTML(resume: any, atsTitle: string, jobTitle?: string): string {
   const c = resume.contact || {};
   const links: any[] = c.links || [];
+
+  // Build full resolvedLinks from contact links + any companyUrls in experience
+  // These are used by linkifyText to make any matching text clickable
+  const resolvedLinks: { displayText: string; url: string }[] = [
+    ...(resume.resolvedLinks || []),
+    ...links.filter((l: any) => l.url),
+  ];
+  // Deduplicate by url
+  const seenUrls = new Set<string>();
+  const uniqueResolvedLinks = resolvedLinks.filter((l: any) => {
+    if (!l.url || seenUrls.has(l.url)) return false;
+    seenUrls.add(l.url);
+    return true;
+  });
 
   const contactParts: string[] = [];
   if (c.phone) contactParts.push(`<span>${c.phone}</span>`);
@@ -191,8 +226,8 @@ function buildHTML(resume: any, atsTitle: string, jobTitle?: string): string {
     const data = section.data || {};
 
     if (k.includes('summary') || k.includes('profile') || k.includes('objective')) {
-      const bullets = (data.bullets || []).map((b: string) => stripEmoji(b));
-      const paragraph = stripEmoji(data.paragraph || '');
+      const bullets = (data.bullets || []).map((b: string) => linkifyText(stripEmoji(b), uniqueResolvedLinks));
+      const paragraph = linkifyText(stripEmoji(data.paragraph || ''), uniqueResolvedLinks);
       return `
 <div class="section">
   <div class="section-title">${label}</div>
@@ -204,13 +239,16 @@ function buildHTML(resume: any, atsTitle: string, jobTitle?: string): string {
     if (k.includes('experience') || k.includes('work')) {
       const entries = data.entries || [];
       const entriesHtml = entries.map((entry: any) => {
-        const bullets = (entry.bullets || []).map((b: string) => stripEmoji(b));
+        const bullets = (entry.bullets || []).map((b: string) => linkifyText(stripEmoji(b), uniqueResolvedLinks));
         return `
 <div class="job">
   <div class="job-header">
     <div class="job-left">
       <span class="job-title">${entry.title || ''}</span>
-      <span class="job-company">${entry.company || ''}</span>
+      ${entry.companyUrl
+        ? `<a href="${entry.companyUrl.startsWith('http') ? entry.companyUrl : 'https://' + entry.companyUrl}" target="_blank" class="job-company" style="text-decoration:underline">${entry.company || ''}</a>`
+        : `<span class="job-company">${entry.company || ''}</span>`
+      }
     </div>
     <div class="job-right">
       <span class="job-dates">${entry.dates || ''}</span>
